@@ -1,10 +1,10 @@
 # markdown-stream
 
-增量流式 Markdown 解析器，逐字符输出带类型的 segment。
+增量流式 Markdown 解析器，逐 rune 输出带类型的 `MarkdownSegment`，不构建 AST 或生成 HTML。
 
-区别于一次性把整篇文本解析成 AST 的解析器（如 gomarkdown），本库面向**边产生边消费**的场景：上游把文本按块喂进来，下游立刻就能拿到带元素类型的字符流。典型场景是流式 LLM 输出——模型正在生成 markdown 回答时，就可以实时按结构切分（比如按段落分句交给 TTS、清洗引用标记存搜索历史），不用等全文生成完。
+面向边产生边消费的场景，例如流式 LLM 输出。上游按块提供文本，下游按元素类型处理字符；需要前瞻的语法会等待后续输入，而不是保证每个输入块立即产生输出。
 
-零外部依赖（仅标准库）。
+要求 Go 1.22 或更新版本，零第三方依赖。提供包含 h1–h7 的小型 Markdown 方言，**不是完整 CommonMark/GFM 实现**。
 
 ## 快速开始
 
@@ -20,13 +20,14 @@ import (
 func main() {
 	parser := markdown.NewParser()
 
-	// 解析器在独立 goroutine 里运行，Start 传入根元素（MarkdownDoc 为预定义的完整文档文法）
 	go parser.Start(markdown.MarkdownDoc)
 
-	// 可以一次喂全部，也可以分多次增量喂入
-	parser.Put("这是**粗体**和一个[链接](https://github.com)。\n")
-	parser.Put("下一段……")
-	parser.Close()
+	// 生产与消费并行，避免大输入填满缓冲区后相互等待。
+	go func() {
+		parser.Put("这是**粗体**和一个[链接](https://github.com)。\n")
+		parser.Put("下一段……")
+		parser.Close()
+	}()
 
 	for {
 		seg, ok := parser.Read()
@@ -38,31 +39,34 @@ func main() {
 }
 ```
 
-每个 `Read()` 返回一个 `MarkdownSegment{Type, Rune}`：`Rune` 是原文本中的一个字符，`Type` 是它所属的元素类型。把 segment 按 `Type` 分组拼回，就能还原出"哪些字符属于标题、哪些属于代码块、哪些是加粗文本"这类结构信息。
+`Read()` 返回 `(MarkdownSegment, bool)`；`ok == false` 表示输出已经耗尽。`Rune` 是一个已解码字符，`Type` 是它所属的元素类型。对默认 `MarkdownDoc`，依次拼接所有输出 rune 等于对全部输入块拼接后进行 Go rune 解码的结果；Markdown 标记和反斜杠也会保留。
 
 ## 流式 API
 
-```go
-p := markdown.NewParser()
-go p.Start(markdown.MarkdownDoc)   // 启动解析（每 Parser 只能 Start 一次）
+每个 Parser 只使用一次：一个 goroutine 调用 `Start(root)`，一个生产者按顺序 `Put` 并最终调用一次 `Close`，一个消费者持续读取输出。
 
-p.Put("增量文本块")                 // 可多次调用；内部有 1024 容量的缓冲 channel
-p.Put("另一个文本块")
-p.Close()                          // 输入结束
+| API | 约定 |
+|---|---|
+| `NewParser()` | 创建独立解析器 |
+| `Start(root)` | 驱动根元素并在根元素结束时关闭输出；通常在独立 goroutine 运行 |
+| `Put(delta)` | 按顺序追加 string 块；缓冲区满时阻塞，不得在 `Close` 后调用 |
+| `Close()` | 标记输入结束；不取消解析、不等待输出消费完成 |
+| `Read()` | 阻塞等待 segment；输出耗尽后返回 `(_, false)` |
+| `ReadNonBlocking()` | 有输出时返回 `(*MarkdownSegment, true)`；暂时无输出时返回 `(nil, true)`；结束时返回 `(_, false)` |
 
-for {
-    seg, ok := p.Read()            // 阻塞读，返回 (MarkdownSegment, true)；输入关闭且耗尽后返回 (_, false)
-    if !ok { break }
-}
-```
+输入缓冲容纳 1024 个 string 块，输出缓冲容纳 64 个 segment。**不要在同一 goroutine 先全部 Put，再开始 Read**：大输入会因背压阻塞。即使调用了 `Close`，输出仍需要持续消费。
 
-非阻塞读（用于不想阻塞等待输出的场景）：
+`Next`、`Peek`、`PushState`、`ResumeState` 和 `OutputRune` 用于串行文法处理，不能从另一个 goroutine 与 `Start` 并发操作。预定义元素和自定义元素的切片也不应在解析期间被修改。
 
-```go
-seg, ok := p.ReadNonBlocking()     // 无可用 segment 时返回 (nil, true)，不阻塞
-```
+### UTF-8 与 EOF
 
-`Start` 与 `Put` 的关系：`Start` 会在一个 goroutine 内驱动根元素的文法向下解析，解析器通过 `Peek` 在拿不到字符时自动阻塞等待 `Put` 喂入的新内容；`Close` 之后 `Peek` 返回 0，解析自然结束。所以**可以一边 Put 一边 Read**，延迟只取决于元素匹配需要的前瞻长度。
+块边界可以落在任意字节位置，包括一个汉字或 emoji 的中间。空块不改变输入，未完整的 UTF-8 前缀会等待后续块；非法 UTF-8 和输入结束时的残缺字节按 Go 的规则产生 `utf8.RuneError`。
+
+游标 API 的结束标记是 `markdown.EOF`（`rune(-1)`），**不是 0**。真实 U+0000 会被正常读取和输出。
+
+### 内存
+
+解析器为回溯保留已经解码的输入，运行时内存随累计输入增长，并非常量空间。根元素处理完成后会释放内部 rune 缓存；大块输入和需要长距离前瞻的语法仍可能占用较多内存。
 
 ## 元素类型
 
@@ -75,7 +79,7 @@ seg, ok := p.ReadNonBlocking()     // 无可用 segment 时返回 (nil, true)，
 | `paragraph` | 段落 |
 | `list` | 无序列表（`- ` / `+ ` / `* `） |
 | `quote` | 引用（`> `） |
-| `table` | 表格（`| ... |`，至少表头 + 分隔行） |
+| `table` | 管道表格（至少表头 + 对齐行） |
 | `code` | 代码块（```` ``` ````，含语言标注） |
 | `equation` | 独立公式（`$$...$$`） |
 | `inline-code` | 行内代码（`` ` ``） |
@@ -94,30 +98,32 @@ seg, ok := p.ReadNonBlocking()     // 无可用 segment 时返回 (nil, true)，
 根元素：
 
 ```go
-markdown.MarkdownDoc   // 完整文档：标题/表格/代码块/公式/列表/引用/段落 的任意组合
+markdown.MarkdownDoc   // 默认组合：标题/表格/代码块/公式/列表/引用/段落
 ```
 
 块级元素：`HeaderElem`、`TableElem`、`CodeElem`、`EquationElem`、`ListElem`、`QuoteElem`、`ParagraphElem`
 
 行内元素：`StrongElem`、`StrongElem2`（`__`）、`ItalicElem`、`ItalicElem2`（`_`）、`LinkElem`、`ImageElem`、`IndexElem`、`InlineCodeElem`、`InlineEquationElem`
 
-可以只解析某一种元素，例如 `go p.Start(markdown.TableElem)`。
+可以只解析某一种元素，例如 `go p.Start(markdown.TableElem)`。这种根元素可能在输入结束之前停止，其余输入不会自动继续解析；应用需要相应安排生产者生命周期。
 
 ## 自定义元素与 Tokenizer
 
-解析器本身是递归下降的文法解释器：`MarkdownElem` 描述一个元素怎么开始、怎么匹配子元素、正文类型和结束符。`Tokenizer` 是匹配原语（`func(ctx) ([]MarkdownSegment, bool)`），组合子可自由拼装：
+解析器使用递归下降文法：`MarkdownElem` 描述元素的起始匹配、子元素、正文类型和结束匹配。通过内置 Tokenizer 工厂组合自定义语法；匹配失败时输入游标会回退。
 
 | Tokenizer | 行为 |
 |---|---|
-| `Any()` | 匹配任意非换行字符（不消费） |
+| `Any()` | 匹配一个非 EOF、非 CR/LF 的 rune，不消费；允许 NUL |
 | `String(t, s)` | 匹配字符串 `s` |
-| `Repeat(t, r, min, max)` | 匹配重复的字符 `r`（min–max 次） |
-| `Runes(t, s)` | 按序匹配字符集 |
+| `Repeat(t, r, min, max)` | 匹配 min–max 次；零次匹配可成功，非法上下界不匹配 |
+| `Runes(t, s)` | 按顺序匹配字符串中的 rune 序列 |
 | `Spaces(t)` | 匹配空格与制表符 |
-| `Until(t, r)` | 匹配直到字符 `r`（处理 `\` 转义） |
-| `UntilRunes(t, rs)` | 匹配直到字符集之一 |
+| `Until(t, r)` | 匹配到 `r` 之前，不消费终止符；保留转义字符，不能用转义跨行 |
+| `UntilRunes(t, rs)` | 同上，以集合 `rs` 中的任一 rune 为终止符 |
 | `Or(...)` | 任选一个分支匹配 |
 | `Sequence(...)` | 按序匹配，任一失败则整体失败 |
+
+`Tokenizer` 的上下文类型未导出，外部包通过这些工厂组合匹配器，而不是自行声明上下文回调。
 
 自定义一个"以 `>>>` 开头、遇到 `<<<` 结束"的元素示例：
 
@@ -131,12 +137,18 @@ block := markdown.MarkdownElem{
 go p.Start(block)
 ```
 
-## 设计要点
+`TrimWhites` 将正文中指定的 rune 标记为 `whitespace`，不会让 `Inline: true` 的元素跨过 CR/LF。结束匹配优先于空白处理。子元素按顺序尝试，只有实际消费输入的匹配才会阻止后续分支；零宽匹配不会使父元素停滞。
 
-- **rune 级消费**：`Parser.Next/Peek` 按 rune 推进，`PushState/ResumeState` 支持回溯，文法匹配失败可整体回退。
-- **行内/块级区分**：`Inline: true` 的元素遇到换行符立即结束；块级元素负责自己消费换行符并输出为 `whitespace`。
-- **转义支持**：`Until/UntilRunes` 会把 `\` 及其后一个字符一起消费，不当作语法符。
-- **大输入**：`Parser.Put` 缓冲 channel 容量 1024，`Parser` 内部按需累积内容；测试覆盖 10 万字符量级输入。
+## 语法边界
+
+- 标题支持 1–7 个 `#`；8 个或更多回退为普通文本。保留本库的 h7 方言，不按 CommonMark 的六级上限解释。
+- 标题、段落、列表、引用和强调在物理行边界结束，识别 LF、CR 和 CRLF。列表只识别 `- `、`+ `、`* `，引用只识别 `> `。
+- 强调支持 `*`、`_`、`**`、`__`，以及 `**bold _italic_**`、`__bold *italic*__` 这类跨分隔符嵌套；词内下划线不启闭强调。不提供完整的分隔符栈或任意嵌套规则。
+- 代码块以三个反引号开始，同行其余内容输出为 `code.syntax`。结束围栏必须从行首开始，恰好三个反引号，之后只能有空格、制表符或行尾。正文中的反引号和带尾随正文的围栏不会提前关闭代码块。
+- 代码块和块级公式正文不解析行内 Markdown。行内代码和行内公式需要在同一物理行闭合。
+- 链接和图片只支持简单的 `[name](url)`、`![alt](url)`；不实现完整的嵌套括号、标题和引用式链接。扩展引用标记支持 `<doc_xxx>`、`<web_xxx>`、`<url_xxx>`。
+- 表格的表头和对齐行必须以 `|` 开始并以 `|` 结束，列数一致。每个对齐单元至少三个 `-`，两侧可各带一个 `:`。转义管道不计作表头列边界；正文由连续以 `|` 开头的行组成，下一条非管道行交回文档文法处理。不构建表格 AST 或验证正文列数。
+- 普通正文中的反斜杠保护其后一个非换行字符，同时保留反斜杠本身。已输出的强调或块级起始标记不会因 EOF 未闭合而撤回；未闭合的链接、图片、引用和行内代码/公式则回退为普通输入继续匹配。
 
 ## 安装
 
@@ -148,9 +160,15 @@ go get github.com/moevis/markdown-stream
 
 ```bash
 go test ./...
+go test -race ./...
+go vet ./...
+go test ./... -cover
+go test -run='^$' -fuzz=FuzzParserPreservesInput -fuzztime=10s -parallel=4
 ```
 
-`parser_test.go` 覆盖：完整文档解析、表格、代码块、公式、无序列表、加粗、引用标记、大负载、增量流式输入（含延迟喂入）。
+测试按职责拆为 `parser_test.go`、`element_test.go` 和 `token_test.go`：验证完整的类型/rune 序列、失败回溯、UTF-8 字节分块、空块、NUL、CR/LF/CRLF、实时输出和大并发输入。`example_test.go` 提供外部包的可执行用法示例；fuzz 检查默认文法的字符保留。
+
+GitHub Actions 使用 Go 1.22 与最新稳定版运行测试和 vet，并在稳定版执行 race 检查。源码与测试保持模块根目录单包结构。
 
 ## License
 

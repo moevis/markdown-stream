@@ -1,318 +1,269 @@
 package markdown
 
 import (
-	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
-var testMarkdown = `
-上海有许多好玩的地方，以下是一些推荐：
-
-1. **东方明珠广播电视塔**：作为上海的标志性建筑之一，东方明珠塔是国家首批AAAAA级旅游景区。塔内设有太空舱、旋转餐厅和上海城市历史发展陈列馆等景观和设施<web_7df48932>。
-
-2. **上海外滩**：外滩是上海的地标性景点，拥有丰富的历史和文化。在这里，你可以欣赏到上海的天际线和黄浦江的美景<web_81d380c0>。
-
-3. **1192弄老上海风情街**：这条街道完美地重现了老上海的风情，让你仿佛穿越回了过去的时光<web_7df48932>。
-
-4. **新场古镇**：这是一个保存完好的古镇，拥有许多古建筑和传统风貌<web_debe60ca>。
-
-5. **上海海昌海洋公园**：这是一个适合家庭出游的地方，有各种海洋生物和游乐设施<web_debe60ca>。
-
-6. **周浦花海**：这里是赏花的好去处，你可以欣赏到各种美丽的花海<web_debe60ca>。
-
-7. **上海野生动物园**：这是中国首座国家级野生动物园，你可以近距离观察各种野生动物<web_debe60ca>。
-
-8. **南京路步行街**：这是上海最繁华的商业街之一，你可以在这里购物、品尝美食，并感受上海的城市氛围<web_99bdceee>。
-
-以上是一些上海好玩的地方，希望对你有所帮助！如果你有更多的兴趣和时间，上海还有许多其他值得一游的景点。
-
-### 示例标题（有三个#）
-
-这是公式 $公式$ 这是引用 <doc_12345>。 ` + "`行内代码块，支持转义反引号 \\` `" + `
-
-公式 
-$$
-\begin{aligned}
-x &= y + z \\
-\end{aligned}
-$$
-
-无序列表：
-- 项目1
-- 项目2
-+ 项目1
-+ 项目2
-* 项目1
-* 项目2
-
- > 引用文本1
- > 引用文本2
-
-  > 引用文本2
-
-这是一个链接到[GitHub](https://github.com)的链接。
-
-#### 图片
-
-这是一张图片：
-![Markdown Logo](https://markdown-here.com/img/icon256.png)
-
-` + "```python" + `
-print("Hello, world!")
-` + "```" + `
-
-#### 强调
-
-*斜体文本*
-**粗体文本**
-
-#### 表格
-
-| 列1 | 列2 | 列3 |
-| --- | --- | --- |
-| 行1列1 | 行1列2 | 行1列3 |
-| 行2列1 | 行2列2 | 行2列3 |
-
-全文完
-`
-
-func lightGreyString(s string) string {
-	return "\033[90m" + s + "\033[0m"
+type typedText struct {
+	typeName ElemType
+	text     string
 }
 
-func TestMarkdown(t *testing.T) {
-	parser := NewParser()
-	go parser.Start(MarkdownDoc)
-	parser.Put(testMarkdown)
-
-	parser.Close()
-
-	var lastType MarkdownSegment
-
-	buff := bytes.NewBuffer(nil)
-	allBuff := bytes.NewBuffer(nil)
-
-	for {
-		seg, ok := parser.Read()
-		if !ok {
-			break
+func segments(parts ...typedText) []MarkdownSegment {
+	var result []MarkdownSegment
+	for _, part := range parts {
+		for _, r := range part.text {
+			result = append(result, MarkdownSegment{Type: part.typeName, Rune: r})
 		}
-		allBuff.WriteRune(seg.Rune)
-		if lastType.Rune == 0 {
-			lastType = seg
+	}
+	return result
+}
+
+func parseChunks(t *testing.T, root MarkdownElem, chunks ...string) []MarkdownSegment {
+	t.Helper()
+	p := NewParser()
+	go p.Start(root)
+	go func() {
+		for _, chunk := range chunks {
+			p.Put(chunk)
 		}
-		if lastType.Type != seg.Type {
-			content := buff.String()
-			if content != "" {
-				fmt.Printf("%s:%s\n", lightGreyString(string(lastType.Type)), content)
+		p.Close()
+	}()
+	result := make(chan []MarkdownSegment, 1)
+	go func() {
+		var output []MarkdownSegment
+		for {
+			seg, ok := p.Read()
+			if !ok {
+				result <- output
+				return
 			}
-			buff.Reset()
-			lastType = seg
+			output = append(output, seg)
 		}
-		buff.WriteRune(seg.Rune)
-	}
-
-	content := buff.String()
-	if content != "" {
-		fmt.Printf("%s:[%s]", lightGreyString(string(lastType.Type)), content)
-	}
-	fmt.Println(allBuff.String())
-}
-
-func TestEquationElem(t *testing.T) {
-	parser := NewParser()
-	go parser.Start(
-		MarkdownElem{
-			Type:         MarkdownDocElemType,
-			TrimWhites:   []rune{' ', '\t', '\n'},
-			SubElems:     []MarkdownElem{ListElem},
-			TextElemType: MarkdownDocElemType.Text(),
-		},
-	)
-	input := `// 代码内容：读“此处是代码”
-// - 数学公式：
-//   - 行内公式：按微软 TTS 能力读“$...$”中的内容，如$E=mc^2$
-//   - 独立公式：读“此处是公式”，如$$\int_{-\infty}^{+\infty} e^{-x^2} dx = \sqrt{\pi}$$
-//`
-	buff := bytes.NewBuffer(nil)
-	parser.Put(input)
-	parser.Close()
-	for {
-		seg, ok := parser.Read()
-		if !ok {
-			break
-		}
-		buff.WriteRune(seg.Rune)
-		fmt.Printf("%s:%s\n", seg.Type, string(seg.Rune))
-	}
-	fmt.Println(buff.String())
-}
-
-func TestTableElem(t *testing.T) {
-	parser := NewParser()
-	go parser.Start(TableElem)
-	parser.Put("| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n| 行1列1 | 行1列2 | 行1列3 |\n| 行2列1 | 行2列2 | 行2列3 |")
-	parser.Close()
-	buf := bytes.NewBuffer(nil)
-	for {
-		seg, ok := parser.Read()
-		if !ok {
-			break
-		}
-		buf.WriteRune(seg.Rune)
-		fmt.Printf("%s:%s\n", seg.Type, string(seg.Rune))
-	}
-	fmt.Println(buf.String())
-}
-
-func TestCodeElem(t *testing.T) {
-	parser := NewParser()
-	go parser.Start(CodeElem)
-	parser.Put("```python\n" +
-		"print(\"Hello, world!\")\n" +
-		"```")
-	for {
-		seg, ok := parser.Read()
-		if !ok {
-			break
-		}
-		fmt.Printf("%s:%s\n", seg.Type, string(seg.Rune))
-	}
-}
-
-func TestIndexReference(t *testing.T) {
-	parser := NewParser()
-	go parser.Start(IndexElem)
-	parser.Put("<web_1234>")
-	for {
-		seg, ok := parser.Read()
-		if !ok {
-			break
-		}
-		fmt.Printf("%s:%s\n", seg.Type, string(seg.Rune))
-	}
-}
-
-func TestListElem(t *testing.T) {
-	parser := NewParser()
-	go parser.Start(
-		MarkdownElem{
-			TrimWhites: []rune{' ', '\t', '\n'},
-			SubElems:   []MarkdownElem{ListElem},
-			Inline:     false,
-		},
-	)
-	parser.Put("- 项目1\n- 项目2\n+ 项目1\n+ 项目2\n* 项目1\n* 项目2")
-	parser.Close()
-	buf := bytes.NewBuffer(nil)
-	for {
-		seg, ok := parser.Read()
-		if !ok {
-			break
-		}
-		buf.WriteRune(seg.Rune)
-		fmt.Printf("%s:%s\n", seg.Type, string(seg.Rune))
-	}
-
-	fmt.Println(buf.String())
-}
-
-func TestStrongElem(t *testing.T) {
-	parser := NewParser()
-	go parser.Start(ParagraphElem)
-	parser.Put("**H<web_1>**：1")
-	parser.Close()
-	for {
-		seg, ok := parser.Read()
-		if !ok {
-			break
-		}
-		fmt.Printf("%s:%s\n", seg.Type, string(seg.Rune))
-	}
-}
-
-func TestLargePayload(t *testing.T) {
-	parser := NewParser()
-	go parser.Start(MarkdownDoc)
-	parser.Put(strings.Repeat("*", 100000) + "hello" + strings.Repeat("*", 999))
-	parser.Close()
-	for {
-		seg, ok := parser.Read()
-		if !ok {
-			break
-		}
-		fmt.Printf("%s:%s\n", seg.Type, string(seg.Rune))
-	}
-}
-
-func Test_MyParser(t *testing.T) {
-	text := `上海有许多好玩的地方，以下是一些推荐：
-##东方明珠广播电视塔
-1. **东方明珠广播电视塔**：作为上海的标志性建筑之一，东方明珠塔是国家首批AAAAA级旅游景区。塔内设有太空舱、旋转餐厅和上海城市历史发展陈列馆等景观和设施<web_7df48932>。
-
-2. **上海外滩**：外滩是上海的地标性景点，拥有丰富的历史和文化。在这里，你可以欣赏到上海的天际线和黄浦江的美景<web_81d380c0>。
-
-3. **1192弄老上海风情街**：这条街道完美地重现了老上海的风情，让你仿佛穿越回了过去的时光<web_7df48932>。
-
-4. **新场古镇**：这是一个保存完好的古镇，拥有许多古建筑和传统风貌<web_debe60ca>。
-
-5. **上海海昌海洋公园**：这是一个适合家庭出游的地方，有各种海洋生物和游乐设施<web_debe60ca>。
-
-6. **周浦花海**：这里是赏花的好去处，你可以欣赏到各种美丽的花海<web_debe60ca>。
-
-7. **上海野生动物园**：这是中国首座国家级野生动物园，你可以近距离观察各种野生动物<web_debe60ca>。
-
-8. **南京路步行街**：这是上海最繁华的商业街之一，你可以在这里购物、品尝美食，并感受上海的城市氛围<web_99bdceee>。
-
-以上是一些上海好玩的地方，希望对你有所帮助！如果你有更多的兴趣和时间，上海还有许多其他值得一游的景点。`
-	parser := NewParser()
-	go parser.Start(MarkdownDoc)
-	parser.Put(text)
-	parser.Close()
-	buf := bytes.NewBuffer(nil)
-	for {
-		seg, ok := parser.Read()
-		if !ok {
-			break
-		}
-		fmt.Printf("%s:%s\n", seg.Type, string(seg.Rune))
-		buf.WriteRune(seg.Rune)
-	}
-	fmt.Println(buf.String())
-}
-
-func Test_Parser(t *testing.T) {
-	text1 := `嗨嗨嗨`
-	text2 := `上海有许多好玩的地方：*`
-	text3 := `*哈哈哈哈`
-	parser := NewParser()
-	go parser.Start(MarkdownDoc)
-	parser.Put(text1)
-	go func() {
-		time.Sleep(time.Second * 2)
-		parser.Put(text2)
 	}()
+	select {
+	case output := <-result:
+		return output
+	case <-time.After(3 * time.Second):
+		t.Fatal("parser did not finish after input was closed")
+		return nil
+	}
+}
+
+func assertSegments(t *testing.T, got []MarkdownSegment, want ...typedText) {
+	t.Helper()
+	expected := segments(want...)
+	if !slices.Equal(got, expected) {
+		t.Fatalf("segments differ:\n got: %#v\nwant: %#v", got, expected)
+	}
+}
+
+func segmentText(segs []MarkdownSegment) string {
+	var text strings.Builder
+	for _, seg := range segs {
+		text.WriteRune(seg.Rune)
+	}
+	return text.String()
+}
+
+func TestParserStreamsBeforeClose(t *testing.T) {
+	p := NewParser()
+	go p.Start(MarkdownDoc)
+	firstChunk := make(chan struct{}, 1)
+	finished := make(chan []MarkdownSegment, 1)
 	go func() {
-		time.Sleep(time.Second * 6)
-		parser.Put(text3)
-		parser.Close()
-	}()
-	buf := bytes.NewBuffer(nil)
-	for {
-		seg, ok := parser.ReadNonBlocking()
-		if !ok {
-			break
+		var output []MarkdownSegment
+		for {
+			seg, ok := p.Read()
+			if !ok {
+				finished <- output
+				return
+			}
+			output = append(output, seg)
+			if len(output) == len("hello ") {
+				firstChunk <- struct{}{}
+			}
 		}
-		if seg != nil {
-			buf.WriteRune(seg.Rune)
-			fmt.Printf("%s:%s:%d:%d\n", seg.Type, string(seg.Rune), parser.PushState().index, utf8.RuneCountInString(buf.String()))
-		} else {
-			fmt.Printf("%s\n", "nil")
+	}()
+	closed := false
+	defer func() {
+		if !closed {
+			p.Close()
+		}
+	}()
+	p.Put("hello ")
+	select {
+	case <-firstChunk:
+	case <-time.After(3 * time.Second):
+		t.Fatal("plain text was buffered until input close")
+	}
+	p.Put("**world**")
+	p.Close()
+	closed = true
+	select {
+	case output := <-finished:
+		assertSegments(t, output,
+			typedText{"paragraph.text", "hello "},
+			typedText{"strong.prefix", "**"},
+			typedText{"strong.text", "world"},
+			typedText{"strong.suffix", "**"},
+		)
+	case <-time.After(3 * time.Second):
+		t.Fatal("parser did not finish the stream")
+	}
+}
+
+func TestParserLargeConcurrentStream(t *testing.T) {
+	const repetitions = 2048
+	const input = "正文 **bold** `code` [链接](https://example.test)\n"
+	want := segments(
+		typedText{"paragraph.text", "正文 "},
+		typedText{"strong.prefix", "**"},
+		typedText{"strong.text", "bold"},
+		typedText{"strong.suffix", "**"},
+		typedText{"paragraph.text", " "},
+		typedText{"inline-code.prefix", "`"},
+		typedText{"inline-code.text", "code"},
+		typedText{"inline-code.suffix", "`"},
+		typedText{"paragraph.text", " "},
+		typedText{"link.[", "["},
+		typedText{"link.name", "链接"},
+		typedText{"link.]", "]"},
+		typedText{"link.(", "("},
+		typedText{"link.url", "https://example.test"},
+		typedText{"link.)", ")"},
+		typedText{"whitespace", "\n"},
+	)
+	p := NewParser()
+	go p.Start(MarkdownDoc)
+	go func() {
+		for range repetitions {
+			p.Put(input)
+		}
+		p.Close()
+	}()
+	finished := make(chan error, 1)
+	go func() {
+		count := 0
+		var mismatch error
+		for {
+			seg, ok := p.Read()
+			if !ok {
+				break
+			}
+			if expected := want[count%len(want)]; seg != expected && mismatch == nil {
+				mismatch = fmt.Errorf("segment %d: got %#v, want %#v", count, seg, expected)
+			}
+			count++
+		}
+		if expected := len(want) * repetitions; count != expected && mismatch == nil {
+			mismatch = fmt.Errorf("got %d segments, want %d", count, expected)
+		}
+		finished <- mismatch
+	}()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent input and output stalled beyond the channel buffer sizes")
+	}
+}
+
+func TestParserNonBlockingReadStates(t *testing.T) {
+	p := NewParser()
+	if seg, ok := p.ReadNonBlocking(); seg != nil || !ok {
+		t.Fatalf("idle read: got (%#v, %t), want (nil, true)", seg, ok)
+	}
+	finished := make(chan struct{})
+	go func() {
+		p.Start(MarkdownDoc)
+		close(finished)
+	}()
+	p.Put("X")
+	p.Close()
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("parser did not close its output")
+	}
+	seg, ok := p.ReadNonBlocking()
+	if !ok || seg == nil || *seg != (MarkdownSegment{Type: "paragraph.text", Rune: 'X'}) {
+		t.Fatalf("available read: got (%#v, %t)", seg, ok)
+	}
+	if _, ok := p.ReadNonBlocking(); ok {
+		t.Fatal("exhausted output still reported an open stream")
+	}
+}
+
+func TestParserUTF8AcrossChunks(t *testing.T) {
+	cases := []struct {
+		name   string
+		chunks []string
+		want   []typedText
+	}{
+		{"three-byte-rune", []string{"\xe4", "", "\xbd", "\xa0"}, []typedText{{"paragraph.text", "你"}}},
+		{"four-byte-rune", []string{"\xf0\x9f", "\x99", "\x82"}, []typedText{{"paragraph.text", "🙂"}}},
+		{"invalid-continuation", []string{"\xe4", "\xff", "x"}, []typedText{{"paragraph.text", "��x"}}},
+		{"incomplete-at-eof", []string{"\xe4", "\xbd"}, []typedText{{"paragraph.text", "��"}}},
+		{"nul-and-delimiters", []string{"\xe4", "\xbd", "\xa0\x00*", "*好*", "*"}, []typedText{{"paragraph.text", "你\x00"}, {"strong.prefix", "**"}, {"strong.text", "好"}, {"strong.suffix", "**"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertSegments(t, parseChunks(t, MarkdownDoc, tc.chunks...), tc.want...)
+		})
+	}
+}
+
+func FuzzParserPreservesInput(f *testing.F) {
+	for _, input := range []string{
+		"", "plain 中文🙂", "before\x00after", "\\*literal\\*", "**a _b_**",
+		"| h |\n| -x- |\n| v |\n", "| h |\n| --- |\n# next\n",
+		"```go\nx := \"```\"\n```\n", "[a\\]b](url)", "a\r\nb\rc",
+		"`a\\\nb`", "\xff\xe4\xbd",
+	} {
+		f.Add(input, uint8(1))
+	}
+	f.Fuzz(func(t *testing.T, input string, chunkSize uint8) {
+		if len(input) > 4096 {
+			t.Skip("bound fuzz input to keep each parser run small")
+		}
+		width := int(chunkSize)%64 + 1
+		var chunks []string
+		for start := 0; start < len(input); start += width {
+			chunks = append(chunks, input[start:min(start+width, len(input))])
+		}
+		got := segmentText(parseChunks(t, MarkdownDoc, chunks...))
+		want := string([]rune(input))
+		if got != want {
+			t.Fatalf("input changed: got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestParserEOFIsDistinctFromNUL(t *testing.T) {
+	p := NewParser()
+	p.Put("A\x00B")
+	p.Close()
+	for _, want := range "A\x00B" {
+		if got := p.Peek(); got != want {
+			t.Fatalf("Peek() = %U, want %U", got, want)
+		}
+		if got := p.Next(); got != want {
+			t.Fatalf("Next() = %U, want %U", got, want)
 		}
 	}
-	fmt.Println(buf.String())
+	for range 2 {
+		if got := p.Peek(); got != EOF {
+			t.Fatalf("Peek() after input = %U, want EOF", got)
+		}
+		if got := p.Next(); got != EOF {
+			t.Fatalf("Next() after input = %U, want EOF", got)
+		}
+	}
 }

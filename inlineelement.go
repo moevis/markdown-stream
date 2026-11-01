@@ -1,5 +1,7 @@
 package markdown
 
+import "unicode"
+
 var (
 	// 能作为子元素出现的 Markdown 元素，包括链接、图片、索引，这些相对于 em/strong 等元素来说，是比较复杂的元素，需要 peek 一下后面的字符才能确定是否是这些元素
 	LinkElem = MarkdownElem{
@@ -40,50 +42,90 @@ var (
 	// 使用 * 包裹的斜体元素
 	ItalicElem = MarkdownElem{
 		Type:            ItalicElemType,
-		Tokenizer:       String(ItalicElemType.Prefix(), "*"),
+		Tokenizer:       emphasisStart(ItalicElemType.Prefix(), "*"),
 		SubElems:        []MarkdownElem{IndexElem, LinkElem},
 		TextElemType:    ItalicElemType.Text(),
-		SuffixPredictor: String(ItalicElemType.Suffix(), "*"),
+		SuffixPredictor: emphasisEnd(ItalicElemType.Suffix(), "*"),
 		Inline:          true,
 	}
 
 	// 使用 _ 包裹的斜体元素
 	ItalicElem2 = MarkdownElem{
 		Type:            ItalicElemType,
-		Tokenizer:       String(ItalicElemType.Prefix(), "_"),
+		Tokenizer:       emphasisStart(ItalicElemType.Prefix(), "_"),
 		SubElems:        []MarkdownElem{IndexElem, LinkElem},
 		TextElemType:    ItalicElemType.Text(),
-		SuffixPredictor: Runes(ItalicElemType.Suffix(), "_"),
+		SuffixPredictor: emphasisEnd(ItalicElemType.Suffix(), "_"),
 		Inline:          true,
 	}
 
 	// 使用 ** 包裹的加粗元素
 	StrongElem = MarkdownElem{
 		Type:      StrongElemType,
-		Tokenizer: String(StrongElemType.Prefix(), "**"),
+		Tokenizer: emphasisStart(StrongElemType.Prefix(), "**"),
 		SubElems: []MarkdownElem{
 			IndexElem,
 			LinkElem,
-			// ItalicElem, // 使用**加粗元素中不能包含*元素
 			ItalicElem2,
 		},
 		TextElemType:    StrongElemType.Text(),
-		SuffixPredictor: String(StrongElemType.Suffix(), "**"),
+		SuffixPredictor: emphasisEnd(StrongElemType.Suffix(), "**"),
 		Inline:          true,
 	}
 
 	// 使用 __ 包裹的加粗元素
 	StrongElem2 = MarkdownElem{
-		Type:      StrongElemType.Prefix(),
-		Tokenizer: String(StrongElemType, "__"),
+		Type:      StrongElemType,
+		Tokenizer: emphasisStart(StrongElemType.Prefix(), "__"),
 		SubElems: []MarkdownElem{
 			IndexElem,
 			LinkElem,
 			ItalicElem,
-			// ItalicElem2, // 使用__加粗元素中不能包含_元素
 		},
 		TextElemType:    StrongElemType.Text(),
-		SuffixPredictor: String(StrongElemType.Suffix(), "__"),
+		SuffixPredictor: emphasisEnd(StrongElemType.Suffix(), "__"),
 		Inline:          true,
 	}
 )
+
+func emphasisStart(elemType ElemType, marker string) Tokenizer {
+	match := String(elemType, marker)
+	underscore := marker[0] == '_'
+	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
+		state := ctx.PushState()
+		segs, matched := match(ctx)
+		if !matched {
+			return nil, false
+		}
+		after := ctx.Peek()
+		if after == EOF || unicode.IsSpace(after) || (underscore && isWordRune(state.previous) && isWordRune(after)) {
+			ctx.ResumeState(state)
+			return nil, false
+		}
+		return segs, true
+	}
+}
+
+func emphasisEnd(elemType ElemType, marker string) Tokenizer {
+	match := String(elemType, marker)
+	underscore := marker[0] == '_'
+	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
+		state := ctx.PushState()
+		if unicode.IsSpace(state.previous) {
+			return nil, false
+		}
+		segs, matched := match(ctx)
+		if !matched {
+			return nil, false
+		}
+		if underscore && isWordRune(state.previous) && isWordRune(ctx.Peek()) {
+			ctx.ResumeState(state)
+			return nil, false
+		}
+		return segs, true
+	}
+}
+
+func isWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r)
+}

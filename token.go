@@ -1,14 +1,16 @@
 package markdown
 
+import "strings"
+
+// Tokenizer matches input transactionally: failure restores the cursor.
+// Use the exported factories to compose matchers for MarkdownElem.
 type Tokenizer func(ctx markdownCtx) ([]MarkdownSegment, bool)
 
-// Any 匹配任意字符，除了换行符，但是不消费字符
+// Any recognizes a non-EOF, non-line-break rune without consuming it.
 func Any() Tokenizer {
 	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
-		if ctx.Peek() == 0 || ctx.Peek() == '\n' {
-			return nil, false
-		}
-		return []MarkdownSegment{}, true
+		c := ctx.Peek()
+		return nil, c != EOF && !isLineBreak(c)
 	}
 }
 
@@ -31,31 +33,30 @@ func String(elemType ElemType, s string) Tokenizer {
 	}
 }
 
-// Repeat 匹配重复的字符
+// Repeat matches between minTimes and maxTimes copies of target.
 func Repeat(elemType ElemType, target rune, minTimes, maxTimes int) Tokenizer {
+	if minTimes < 0 || maxTimes < minTimes {
+		return func(markdownCtx) ([]MarkdownSegment, bool) { return nil, false }
+	}
 	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
-		segs := []MarkdownSegment{}
+		var segs []MarkdownSegment
 		state := ctx.PushState()
-		for i := 0; i < maxTimes; i++ {
-			if ctx.Peek() != target {
+		for i := range maxTimes {
+			c := ctx.Peek()
+			if c == EOF || c != target {
 				if i < minTimes {
 					ctx.ResumeState(state)
 					return nil, false
 				}
 				return segs, true
 			}
-			segs = append(segs, MarkdownSegment{Type: elemType, Rune: target})
-			ctx.Next()
-		}
-		if len(segs) == 0 {
-			// 没有匹配到任何字符
-			return nil, false
+			segs = append(segs, MarkdownSegment{Type: elemType, Rune: ctx.Next()})
 		}
 		return segs, true
 	}
 }
 
-// MatchRune 匹配字符集
+// Runes matches an ordered rune sequence.
 func Runes(elemType ElemType, runes string) Tokenizer {
 	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
 		state := ctx.PushState()
@@ -87,84 +88,74 @@ func Spaces(elemType ElemType) Tokenizer {
 	}
 }
 
+// UntilRunes stops before any target rune; escapes cannot cross a line break.
 func UntilRunes(elemType ElemType, runes string) Tokenizer {
 	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
 		state := ctx.PushState()
-		segs := []MarkdownSegment{}
+		var segs []MarkdownSegment
 		for {
 			c := ctx.Peek()
-			if c == 0 {
+			if c == EOF {
 				ctx.ResumeState(state)
 				return nil, false
 			}
-			// 如果遇到转义字符，就吃掉转义字符和后面的字符
+			if strings.ContainsRune(runes, c) {
+				return segs, true
+			}
+			if isLineBreak(c) {
+				ctx.ResumeState(state)
+				return nil, false
+			}
 			if c == '\\' {
 				ctx.Next()
-				next := ctx.Next()
-				// 如果转义符后面没有字符了，就跳出
-				if next == 0 {
+				next := ctx.Peek()
+				if next == EOF || isLineBreak(next) {
 					ctx.ResumeState(state)
 					return nil, false
 				}
 				segs = append(segs,
 					MarkdownSegment{Type: elemType, Rune: '\\'},
-					MarkdownSegment{Type: elemType, Rune: next},
+					MarkdownSegment{Type: elemType, Rune: ctx.Next()},
 				)
 				continue
 			}
-			for _, r := range runes {
-				if c == r {
-					return segs, true
-				}
-			}
-			// 如果遇到换行符，就跳出
-			if c == '\n' {
-				ctx.ResumeState(state)
-				return nil, false
-			}
-			segs = append(segs, MarkdownSegment{Type: elemType, Rune: c})
-			ctx.Next()
+			segs = append(segs, MarkdownSegment{Type: elemType, Rune: ctx.Next()})
 		}
 	}
 }
 
-// Until 匹配直到遇到字符 r 为止，遇到转义字符 \ 会吃掉转义字符和后面的字符，遇到换行符会跳出
-// 跳出指的是匹配失败
+// Until matches up to r without consuming it; escapes cannot cross a line break.
 func Until(elemType ElemType, r rune) Tokenizer {
 	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
 		state := ctx.PushState()
-		segs := []MarkdownSegment{}
+		var segs []MarkdownSegment
 		for {
 			c := ctx.Peek()
-			if c == 0 {
+			if c == EOF {
 				ctx.ResumeState(state)
 				return nil, false
 			}
-			// 如果遇到转义字符，就吃掉转义字符和后面的字符
+			if c == r {
+				return segs, true
+			}
+			if isLineBreak(c) {
+				ctx.ResumeState(state)
+				return nil, false
+			}
 			if c == '\\' {
 				ctx.Next()
-				next := ctx.Next()
-				// 如果转义符后面没有字符了，就跳出
-				if next == 0 {
+				next := ctx.Peek()
+				if next == EOF || isLineBreak(next) {
 					ctx.ResumeState(state)
 					return nil, false
 				}
 				segs = append(segs,
 					MarkdownSegment{Type: elemType, Rune: '\\'},
-					MarkdownSegment{Type: elemType, Rune: next},
+					MarkdownSegment{Type: elemType, Rune: ctx.Next()},
 				)
 				continue
 			}
-			if c == r {
-				return segs, true
-			}
-			// 如果遇到换行符，就跳出
-			if c == '\n' {
-				ctx.ResumeState(state)
-				return nil, false
-			}
-			segs = append(segs, MarkdownSegment{Type: elemType, Rune: c})
-			ctx.Next()
+			segs = append(segs, MarkdownSegment{Type: elemType, Rune: ctx.Next()})
 		}
 	}
 }
@@ -201,111 +192,174 @@ func Sequence(matchers ...Tokenizer) Tokenizer {
 	}
 }
 
+// MatchTableHead matches a pipe-delimited header and its physical line ending.
 func MatchTableHead() Tokenizer {
-	borderType := TableElemType.SubType("border")
-	headerText := TableElemType.SubType("text")
+	matcher := tableHeadMatcher()
 	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
+		segs, _, matched := matcher(ctx)
+		return segs, matched
+	}
+}
+
+func tableHeadMatcher() func(markdownCtx) ([]MarkdownSegment, int, bool) {
+	borderType := TableElemType.SubType("border")
+	textType := TableElemType.Text()
+	return func(ctx markdownCtx) ([]MarkdownSegment, int, bool) {
 		state := ctx.PushState()
-		segs := []MarkdownSegment{}
 		if ctx.Peek() != '|' {
-			ctx.ResumeState(state)
-			return nil, false
+			return nil, 0, false
 		}
-
-		segs = append(segs, MarkdownSegment{Type: borderType, Rune: ctx.Peek()})
-		ctx.Next() // 消耗掉 |
-
-		colNum := 0
-
+		segs := []MarkdownSegment{{Type: borderType, Rune: ctx.Next()}}
+		columns := 0
+		lastWasPipe := true
 		for {
-			r := ctx.Peek()
-			if r == 0 {
+			c := ctx.Peek()
+			if c == EOF {
 				ctx.ResumeState(state)
-				return nil, false
+				return nil, 0, false
 			}
-			// 如果遇到换行符，就跳出
-			if r == '\n' {
-				if colNum == 0 {
-					// 如果一列都没有，就跳出
+			if isLineBreak(c) {
+				if columns == 0 || !lastWasPipe {
 					ctx.ResumeState(state)
-					return nil, false
+					return nil, 0, false
 				}
-				segs = append(segs, MarkdownSegment{Type: WhitespaceElemType, Rune: r})
-				// 消耗掉换行符
-				ctx.Next()
-				return segs, true
-			} else if r == '|' {
-				colNum++
-				segs = append(segs, MarkdownSegment{Type: borderType, Rune: r})
-			} else if r == ' ' || r == '\t' {
-				segs = append(segs, MarkdownSegment{Type: WhitespaceElemType, Rune: r})
-			} else {
-				segs = append(segs, MarkdownSegment{Type: headerText, Rune: r})
+				segs = append(segs, MarkdownSegment{Type: WhitespaceElemType, Rune: ctx.Next()})
+				if c == '\r' && ctx.Peek() == '\n' {
+					segs = append(segs, MarkdownSegment{Type: WhitespaceElemType, Rune: ctx.Next()})
+				}
+				return segs, columns, true
 			}
-			ctx.Next()
+			switch c {
+			case '|':
+				columns++
+				lastWasPipe = true
+				segs = append(segs, MarkdownSegment{Type: borderType, Rune: ctx.Next()})
+			case ' ', '\t':
+				segs = append(segs, MarkdownSegment{Type: WhitespaceElemType, Rune: ctx.Next()})
+			case '\\':
+				ctx.Next()
+				next := ctx.Peek()
+				if next == EOF || isLineBreak(next) {
+					ctx.ResumeState(state)
+					return nil, 0, false
+				}
+				lastWasPipe = false
+				segs = append(segs,
+					MarkdownSegment{Type: textType, Rune: '\\'},
+					MarkdownSegment{Type: textType, Rune: ctx.Next()},
+				)
+			default:
+				lastWasPipe = false
+				segs = append(segs, MarkdownSegment{Type: textType, Rune: ctx.Next()})
+			}
 		}
 	}
 }
 
-// 不那么严格的验证，只要以 | 开头，中间有 | 或者 : 或者 - 就可以，但是不能出现其他字符
+// MatchTableAlignRow matches strict alignment cells and leaves the line ending unread.
 func MatchTableAlignRow() Tokenizer {
+	matcher := tableAlignMatcher()
+	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
+		segs, _, matched := matcher(ctx, nil)
+		return segs, matched
+	}
+}
+
+func tableAlignMatcher() func(markdownCtx, []MarkdownSegment) ([]MarkdownSegment, int, bool) {
 	borderType := TableElemType.SubType("border")
+	return func(ctx markdownCtx, segs []MarkdownSegment) ([]MarkdownSegment, int, bool) {
+		state := ctx.PushState()
+		if ctx.Peek() != '|' {
+			return nil, 0, false
+		}
+		segs = append(segs, MarkdownSegment{Type: borderType, Rune: ctx.Next()})
+		columns := 0
+		for {
+			c := ctx.Peek()
+			for c == ' ' || c == '\t' {
+				segs = append(segs, MarkdownSegment{Type: WhitespaceElemType, Rune: ctx.Next()})
+				c = ctx.Peek()
+			}
+			if columns > 0 && (c == EOF || isLineBreak(c)) {
+				return segs, columns, true
+			}
+			if c == ':' {
+				segs = append(segs, MarkdownSegment{Type: borderType, Rune: ctx.Next()})
+				c = ctx.Peek()
+			}
+			dashes := 0
+			for c == '-' {
+				segs = append(segs, MarkdownSegment{Type: borderType, Rune: ctx.Next()})
+				dashes++
+				c = ctx.Peek()
+			}
+			if dashes < 3 {
+				ctx.ResumeState(state)
+				return nil, 0, false
+			}
+			if c == ':' {
+				segs = append(segs, MarkdownSegment{Type: borderType, Rune: ctx.Next()})
+				c = ctx.Peek()
+			}
+			for c == ' ' || c == '\t' {
+				segs = append(segs, MarkdownSegment{Type: WhitespaceElemType, Rune: ctx.Next()})
+				c = ctx.Peek()
+			}
+			if c != '|' {
+				ctx.ResumeState(state)
+				return nil, 0, false
+			}
+			segs = append(segs, MarkdownSegment{Type: borderType, Rune: ctx.Next()})
+			columns++
+		}
+	}
+}
+
+func matchTableStart() Tokenizer {
+	head := tableHeadMatcher()
+	alignment := tableAlignMatcher()
 	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
 		state := ctx.PushState()
-		segs := []MarkdownSegment{}
-		r := ctx.Peek()
-		if r != '|' {
+		segs, columns, matched := head(ctx)
+		if !matched {
+			return nil, false
+		}
+		segs, alignmentColumns, matched := alignment(ctx, segs)
+		if !matched || columns != alignmentColumns {
 			ctx.ResumeState(state)
 			return nil, false
 		}
-
-		segs = append(segs, MarkdownSegment{Type: borderType, Rune: ctx.Peek()})
-		ctx.Next() // 消耗掉 |
-
-		for {
-			r := ctx.Peek()
-			if r == 0 {
-				ctx.ResumeState(state)
-				return nil, false
-			}
-			// 如果遇到换行符，就跳出
-			if r == '\n' {
-				return segs, true
-			} else if r == '|' || r == ':' || r == '-' {
-				segs = append(segs, MarkdownSegment{Type: borderType, Rune: r})
-			} else if r == ' ' || r == '\t' {
-				segs = append(segs, MarkdownSegment{Type: WhitespaceElemType, Rune: r})
-			}
-			ctx.Next()
-		}
+		return segs, true
 	}
 }
 
-// 用于判断下一行是不是表格行，如果是，MarkdownElem.SuffixPredictor 会调用这个函数，如果返回 true，表示到了表格的结尾
+// NotTableRow ends a table at a line ending followed by a non-pipe line or EOF.
 func NotTableRow() Tokenizer {
 	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
 		c := ctx.Peek()
-		if c == 0 {
-			// 如果已经到了文件末尾，就返回 true，表示到了表格的结尾
+		if c == EOF {
 			return nil, true
 		}
-		// 如果当前字符是换行符，就开始判断换行符的下一个字符是不是 |
-		if c == '\n' {
-			state := ctx.PushState()
-			ctx.Next()
-			if ctx.Peek() == '|' {
-				// 如果下一个字符是 |，就表示下一行是表格行
-				ctx.ResumeState(state)
-				return nil, false
-			} else {
-				// 否则就是表格的结尾
-				return []MarkdownSegment{
-					{Type: WhitespaceElemType, Rune: '\n'},
-					// {Type: borderType, Rune: '|'},
-				}, true
-			}
+		if !isLineBreak(c) {
+			return nil, false
 		}
-		return nil, false
+		state := ctx.PushState()
+		ctx.Next()
+		crlf := c == '\r' && ctx.Peek() == '\n'
+		if crlf {
+			ctx.Next()
+		}
+		if ctx.Peek() == '|' {
+			ctx.ResumeState(state)
+			return nil, false
+		}
+		if crlf {
+			return []MarkdownSegment{
+				{Type: WhitespaceElemType, Rune: '\r'},
+				{Type: WhitespaceElemType, Rune: '\n'},
+			}, true
+		}
+		return []MarkdownSegment{{Type: WhitespaceElemType, Rune: c}}, true
 	}
 }
 

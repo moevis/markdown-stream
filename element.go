@@ -1,6 +1,9 @@
 package markdown
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 type ElemType string
 
@@ -43,17 +46,21 @@ func (e ElemType) IsEmpty() bool {
 	return len(e) == 0
 }
 
+// MarkdownElem describes an element's start, body, children, and end.
+// Elements and their slices must remain unchanged while being parsed.
 type MarkdownElem struct {
 	Type   ElemType // 只是用来标记的，不会依赖这个字段来判断类型
-	Inline bool     // 是否是行内元素，行内元素遇到换行符会被截断
+	Inline bool     // 行内元素在 CR/LF 前结束，不消费行边界
 
 	Tokenizer Tokenizer
 
+	// TrimWhites labels matching body runes as whitespace; it does not remove them.
 	TrimWhites []rune
 
-	// 可能的子元素，子元素的匹配是无序的
+	// 子元素按顺序尝试，第一个实际消费输入的匹配优先。
 	SubElems []MarkdownElem
 
+	// TextElemType labels body runes. With no body type or children, matching is atomic.
 	TextElemType ElemType
 
 	SuffixPredictor Tokenizer
@@ -72,135 +79,67 @@ func (m *MarkdownElem) foundSuffix(ctx markdownCtx) bool {
 	return matched
 }
 
-func (m *MarkdownElem) processSubElems(ctx markdownCtx) (processed bool) {
+func (m *MarkdownElem) processBody(ctx markdownCtx) {
 	for {
 		c := ctx.Peek()
-		if c == 0 {
-			break
+		if c == EOF || (m.Inline && isLineBreak(c)) {
+			return
 		}
-		// 行内元素遇到换行符会马上结束
-		if m.Inline && c == '\n' {
-			return true
+		if m.foundSuffix(ctx) {
+			return
 		}
-		// 消耗空白字符，如果看到末尾，就结束
-		if cont, whiteNum := m.consumeWhites(ctx); !cont {
-			break
-		} else if whiteNum > 0 {
+		if slices.Contains(m.TrimWhites, c) {
+			ctx.OutputRune(ctx.Next(), WhitespaceElemType)
 			continue
 		}
-		subElementMatched := -1
-		// 优先匹配子元素
-		for i, sub := range m.SubElems {
-			if sub.Process(ctx) {
-				subElementMatched = i
-				break
-			}
-		}
-
-		if subElementMatched == -1 {
-			// 要么当前元素没有子元素，要么现在读到的数据没有匹配到子元素
-			// 那么当前字符要由当前元素来处理
-			ctx.OutputRune(c, m.TextElemType)
+		if len(m.SubElems) > 0 && isLineBreak(c) {
+			ctx.OutputRune(c, WhitespaceElemType)
 			ctx.Next()
-		} else {
-			// 匹配到了子元素
-			if !m.Inline {
-				// 当前元素是块元素，需要负责自己处理换行符
-				// subElement 可能已经消耗了前面的变量 c，所以这里要重新 peek
-				c = ctx.Peek()
-				if c == '\n' {
-					// 子元素最后看到的是 \n，并且因为换行符的原因结束了
-					if m.SubElems[subElementMatched].Inline {
-						// 如果之前的子元素是行内元素，需要在这里输出换行符
-						ctx.OutputRune(c, WhitespaceElemType)
-						ctx.Next()
-					}
-				}
-			}
+			continue
 		}
-
-		// 如果有结束符后缀，就根据结束符后缀来判断是否结束
-		if m.foundSuffix(ctx) {
-			return true
-		}
-	}
-	return true
-}
-
-func (m *MarkdownElem) Process(ctx markdownCtx) (processed bool) {
-	if ctx.Peek() == 0 {
-		return false
-	}
-	if m.Tokenizer != nil {
-		if segs, ok := m.Tokenizer(ctx); ok {
-			for _, seg := range segs {
-				ctx.OutputRune(seg.Rune, seg.Type)
+		if c == '\\' && !m.TextElemType.IsEmpty() && (m.Inline || len(m.SubElems) > 0) {
+			ctx.OutputRune(ctx.Next(), m.TextElemType)
+			next := ctx.Peek()
+			if next != EOF && !isLineBreak(next) {
+				ctx.OutputRune(ctx.Next(), m.TextElemType)
 			}
-			// if len(m.SubElems) == 0 {
-			// 	// 如果没有子元素，表示已经匹配结束了
-			// 	return true
-			// }
-		} else {
-			// 如果 sequence pattern 没有匹配成功，就直接返回
-			return false
+			continue
 		}
-	} else {
-		// 如果没有子元素，且没有 sequence pattern 的检查，就直接返回
-		if len(m.SubElems) == 0 {
-			return false
-		}
-	}
-	if cont, _ := m.consumeWhites(ctx); !cont {
-		return false
-	}
-	if len(m.SubElems) == 0 {
-		if !m.TextElemType.IsEmpty() {
-			// 没有子元素，但是对于文本元素，需要输出当前字符
-			for {
-				c := ctx.Peek()
-				if c == 0 {
-					break
-				}
-				if cont, _ := m.consumeWhites(ctx); !cont {
-					return true
-				}
-				if m.foundSuffix(ctx) {
-					return true
-				}
-				ctx.OutputRune(c, m.TextElemType)
-				ctx.Next()
-			}
-		} else {
-			// 没有子元素，并且不需要 parse 普通字符（TextElemType.IsEmpty() == true）
-			return true
-		}
-	}
-	// 按子元素来匹配
-	return m.processSubElems(ctx)
-}
-
-// consumeWhites 消耗掉前面的空白字符，返回 false 表示已经没有内容了
-func (m *MarkdownElem) consumeWhites(ctx markdownCtx) (running bool, consumeNum int) {
-	if len(m.TrimWhites) > 0 {
-		for {
-			c := ctx.Peek()
-			if c == 0 {
-				return false, consumeNum
-			}
-			hasWhitespace := false
-			for _, t := range m.TrimWhites {
-				if c == t {
-					consumeNum++
-					hasWhitespace = true
-					ctx.OutputRune(c, WhitespaceElemType)
-					ctx.Next()
-					break
-				}
-			}
-			if !hasWhitespace {
+		matched := false
+		for i := range m.SubElems {
+			if m.SubElems[i].Process(ctx) {
+				matched = true
 				break
 			}
 		}
+		if !matched {
+			ctx.OutputRune(ctx.Next(), m.TextElemType)
+		}
 	}
-	return true, consumeNum
+}
+
+func (m *MarkdownElem) Process(ctx markdownCtx) bool {
+	if ctx.Peek() == EOF {
+		return false
+	}
+	start := ctx.PushState()
+	if m.Tokenizer != nil {
+		segs, matched := m.Tokenizer(ctx)
+		if !matched {
+			return false
+		}
+		for _, seg := range segs {
+			ctx.OutputRune(seg.Rune, seg.Type)
+		}
+	} else if len(m.SubElems) == 0 {
+		return false
+	}
+	if len(m.SubElems) > 0 || !m.TextElemType.IsEmpty() {
+		m.processBody(ctx)
+	}
+	return ctx.PushState().index > start.index
+}
+
+func isLineBreak(r rune) bool {
+	return r == '\r' || r == '\n'
 }

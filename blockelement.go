@@ -2,10 +2,10 @@ package markdown
 
 // Primary elements 主要的 markdown 元素
 var (
-	// 由 # 开头的标题，最多支持 7 个 #，即最大支持 h1 ~ h7，结束由 \n 结束
+	// 标题支持 1–7 个 #；更多的 # 回退为普通文本。
 	HeaderElem = MarkdownElem{
 		Type:      HeaderElemType,
-		Tokenizer: Repeat(HeaderElemType.Prefix(), '#', 1, 7),
+		Tokenizer: headerTokenizer(),
 		SubElems: []MarkdownElem{
 			StrongElem,
 			StrongElem2,
@@ -20,30 +20,32 @@ var (
 		TextElemType: HeaderElemType.Text(),
 		Inline:       true,
 	}
-	// 表格块，由 | 开头，由 \n 结束，至少有三行
+	// 表格需要列数一致的表头和对齐行，在下一条非管道行之前结束。
 	TableElem = MarkdownElem{
-		Type:            TableElemType,
-		Tokenizer:       Sequence(MatchTableHead(), MatchTableAlignRow()),
-		SubElems:        []MarkdownElem{LinkElem, IndexElem},
+		Type:       TableElemType,
+		Tokenizer:  matchTableStart(),
+		TrimWhites: []rune{' ', '\t', '\r', '\n'},
+		SubElems: []MarkdownElem{
+			{Type: TableElemType.SubType("border"), Tokenizer: String(TableElemType.SubType("border"), "|")},
+			LinkElem,
+			IndexElem,
+		},
 		SuffixPredictor: NotTableRow(),
 		TextElemType:    TableElemType.Text(),
 	}
 	// 公式块，由 $$ 开头，$$ 结束，非行内元素
 	EquationElem = MarkdownElem{
 		Type:            EquationElemType,
-		Tokenizer:       String(EquationElemType, "$$"),
+		Tokenizer:       String(EquationElemType.Prefix(), "$$"),
 		TextElemType:    EquationElemType.Text(),
 		SuffixPredictor: String(EquationElemType.Suffix(), "$$"),
 	}
-	// 代码块，由 ``` 开头，``` 结束，非行内元素
+	// 代码结束围栏从行首开始，其后只能有空格、制表符和行尾。
 	CodeElem = MarkdownElem{
-		Type: CodeElemType,
-		Tokenizer: Sequence(
-			String(CodeElemType.Prefix(), "```"),
-			UntilRunes(CodeElemType.SubType("syntax"), "`\n"), // 遇上 ` 或者 \n 就结束
-		),
+		Type:            CodeElemType,
+		Tokenizer:       codeStart(),
 		TextElemType:    CodeElemType.Text(),
-		SuffixPredictor: String(CodeElemType.Suffix(), "```"),
+		SuffixPredictor: codeEnd(),
 	}
 	// 无序列表，由 - 开头，由 \n 结束
 	ListElem = MarkdownElem{
@@ -106,7 +108,7 @@ var (
 	// 根文档，由多个元素组成，在输入结束后结束
 	MarkdownDoc = MarkdownElem{
 		Type:       MarkdownDocElemType,
-		TrimWhites: []rune{' ', '\t', '\n'},
+		TrimWhites: []rune{' ', '\t', '\r', '\n'},
 		SubElems: []MarkdownElem{
 			HeaderElem,
 			TableElem,
@@ -118,3 +120,62 @@ var (
 		},
 	}
 )
+
+func headerTokenizer() Tokenizer {
+	match := Repeat(HeaderElemType.Prefix(), '#', 1, 7)
+	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
+		state := ctx.PushState()
+		segs, matched := match(ctx)
+		if !matched {
+			return nil, false
+		}
+		if ctx.Peek() == '#' {
+			ctx.ResumeState(state)
+			return nil, false
+		}
+		return segs, true
+	}
+}
+
+func codeStart() Tokenizer {
+	match := String(CodeElemType.Prefix(), "```")
+	syntaxType := CodeElemType.SubType("syntax")
+	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
+		segs, matched := match(ctx)
+		if !matched {
+			return nil, false
+		}
+		for {
+			c := ctx.Peek()
+			if c == EOF || isLineBreak(c) {
+				return segs, true
+			}
+			segs = append(segs, MarkdownSegment{Type: syntaxType, Rune: ctx.Next()})
+		}
+	}
+}
+
+func codeEnd() Tokenizer {
+	match := String(CodeElemType.Suffix(), "```")
+	return func(ctx markdownCtx) ([]MarkdownSegment, bool) {
+		state := ctx.PushState()
+		if state.previous != EOF && !isLineBreak(state.previous) {
+			return nil, false
+		}
+		segs, matched := match(ctx)
+		if !matched {
+			return nil, false
+		}
+		for {
+			c := ctx.Peek()
+			if c == EOF || isLineBreak(c) {
+				return segs, true
+			}
+			if c != ' ' && c != '\t' {
+				ctx.ResumeState(state)
+				return nil, false
+			}
+			segs = append(segs, MarkdownSegment{Type: WhitespaceElemType, Rune: ctx.Next()})
+		}
+	}
+}
