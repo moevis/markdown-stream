@@ -1,8 +1,8 @@
 # markdown-stream
 
-原生 Go CommonMark 解析器，支持流式/分块输入与自定义语法扩展，适合实时接收并正确解析 LLM 的流式输出。提供具体语法树（CST）、可编辑语义 AST 和 HTML 编译；核心文法由声明式 `Rule` 组合子构成。
+原生 Go CommonMark 解析器，支持流式 token 输出与自定义语法扩展。提供具体语法树（CST）、可编辑语义 AST 和 HTML 编译；核心文法由声明式 `Rule` 组合子构成。
 
-- **流式输入**：`NewParser` 按块接收；关闭输入后确认并发布文档与事件。
+- **流式解析**：`NewTokenStream` 接收分块输入，通过 `Next` 返回已确认的 token 事件。
 - **自定义语法**：`SyntaxExtension` + `Rule` 组合子，与内置文法共用同一入口。
 - **LLM 输出**：可直接写入模型逐块返回的文本，最终解析结果与一次性输入相同。
 
@@ -26,46 +26,39 @@ func main() {
 }
 ```
 
-## 分块输入 API
+## 流式输入
 
-```go
-parser := markdown.NewParser()
-if err := parser.Put("**Hi"); err != nil {
-	panic(err)
-}
-if _, err := parser.Write([]byte("**")); err != nil {
-	panic(err)
-}
-if err := parser.Close(); err != nil {
-	panic(err)
-}
-document, err := parser.Document()
-if err != nil {
-	panic(err)
-}
-var html strings.Builder
-if err := markdown.RenderHTML(&html, document); err != nil {
-	panic(err)
-}
-fmt.Println(html.String())
-// <p><strong>Hi</strong></p>
-```
-
-完整可执行示例见 `example_test.go`。
-
-## 流式 token
-
-`NewTokenStream` 在输入仍在到达时返回已经不可变的顶层块 token；事件流始终是完整 `Parse` 事件的前缀。解码、分行和块解析都按新增输入增量处理；含 `[`/`[^` 的段落、未闭合的容器或代码块会延迟到 `Close`，带 resolver/自定义 Tokenizer 的 Options 回退到完整解析。
+将文本块交给 `Put` / `Write`，每次追加后调用 `Next` 读取已确认的 token 事件。`ReadPending` 表示当前没有更多已确认事件；输入结束时调用 `Close`，继续读取直到 `ReadDone`。
 
 ```go
 stream := markdown.NewTokenStream()
-if err := stream.Put("# title\n"); err != nil {
+drain := func() {
+	for {
+		event, status, err := stream.Next()
+		if err != nil {
+			panic(err)
+		}
+		if status != markdown.ReadEvent {
+			return
+		}
+		if event.Kind == markdown.Enter {
+			fmt.Printf("%s %q\n", event.Token.Type, event.Token.Source())
+		}
+	}
+}
+for _, chunk := range []string{"# 标", "题\n\n", "正文\n\n"} {
+	if err := stream.Put(chunk); err != nil {
+		panic(err)
+	}
+	drain()
+}
+if err := stream.Close(); err != nil {
 	panic(err)
 }
-event, status, err := stream.Next() // ReadEvent：atxHeading Enter
+drain()
 ```
 
-`Parse` 与 `Parser.Read` 仍只在输入关闭并确认后发布完整文档。
+带 resolver 或自定义 Tokenizer 的配置在输入结束后整篇解析；需要完整 `Document` 时使用 `Parse`。
 
 ## 可编辑 AST
 
