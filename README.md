@@ -116,9 +116,26 @@ criticMarkup := markdown.Or(
 syntax := markdown.SyntaxExtension{Text: map[markdown.Code][]markdown.Construct{
 	'{': {{Name: "criticMarkup", Rule: criticMarkup}},
 }}
-```
 
-将 `markdown.Options{Extensions: []markdown.SyntaxExtension{syntax}}` 传给 `Parse` 或 `NewParser` 即可启用。`Span` 捕获完整定界符与正文；缺少结束符时整体回退。四种 token 的 `Source()` 都保留定界符，替换还要求 `~>` 出现在结束符之前。
+document, err := markdown.Parse("{++新增++} {--删除--} {>>批注<<}", markdown.Options{
+	Extensions: []markdown.SyntaxExtension{syntax},
+})
+if err != nil {
+	panic(err)
+}
+for _, event := range document.Events {
+	if event.Kind != markdown.Enter {
+		continue
+	}
+	switch event.Token.Type {
+	case "criticAdd", "criticDelete", "criticReplace", "criticComment":
+		fmt.Println(event.Token.Type, event.Token.Source())
+	}
+}
+// criticAdd {++新增++}
+// criticDelete {--删除--}
+// criticComment {>>批注<<}
+```
 
 ## 安装
 
