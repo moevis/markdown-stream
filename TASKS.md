@@ -169,3 +169,13 @@ GOTOOLCHAIN=go1.22.12 go test ./... -count=1 -timeout=30s &&
 go doc .
 ```
 
+
+## E：流式 token（新增 opt-in API）
+
+负责人：主助手。状态：第一版完成，待评审粒度。
+
+- 新增 `TokenStream`：`NewTokenStream`/`Put`/`Write`/`Close`/`Next`，在输入到达时返回已确认的顶层块 token；事件始终是完整 `Parse` 事件的前缀，不撤回。
+- `Parse` 与 `Parser.Read` 保持关闭后发布，语义不变。
+- 含 `[`/`[^` 的段落、未闭合容器/代码块、带 resolver/自定义 Tokenizer 的扩展延迟到 `Close`。
+- 回归：逐字节前缀断言、闭合块提前发出、前向引用保持、resolver 保守延迟、token Source 与 Range 一致。
+- 后续：ATX marker 或开 fence 的行级输出需要可变 token 或增量构建器，当前版本按完整顶层块确认。

@@ -21,6 +21,8 @@
 // (Event, ReadStatus, error), distinguishing ReadPending, ReadEvent, and ReadDone.
 // Each Parser is single-use. Writes and close are serialized; multiple event
 // readers share one cursor. Writes or repeated close after closure return ErrClosed.
+// TokenStream exposes confirmed top-level token events before Close; Parse and
+// Parser.Read still publish the complete document only after confirmation.
 //
 // Options registers syntax and HTML independently: pair GFM() with GFMHTML(),
 // and Math() with MathHTML(). GFM includes tables, strikethrough, task lists,

@@ -53,6 +53,20 @@ fmt.Println(html.String())
 
 完整可执行示例见 `example_test.go`。
 
+## 流式 token
+
+`NewTokenStream` 在输入仍在到达时返回已经不可变的顶层块 token；事件流始终是完整 `Parse` 事件的前缀。含 `[`/`[^` 的段落、未闭合的容器或代码块会延迟到 `Close`。
+
+```go
+stream := markdown.NewTokenStream()
+if err := stream.Put("# title\n"); err != nil {
+	panic(err)
+}
+event, status, err := stream.Next() // ReadEvent：atxHeading Enter
+```
+
+`Parse` 与 `Parser.Read` 仍只在输入关闭并确认后发布完整文档。
+
 ## 可编辑 AST
 
 `Document.Root` 是可编辑语义 AST。下面的例子修改文本节点，再分别用 `RenderHTML`（保留解析时的具体语义）和 `RenderAST`（反映修改后的树）渲染：
