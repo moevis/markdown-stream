@@ -473,7 +473,7 @@ func blockConsumeExtension(lines []sourceLine, index int, view sourceView, end i
 
 func (s *parseState) parseBlocks(lines []sourceLine, parent *Node) error {
 	d := &blockDriver{s: s, parent: parent, stack: []*blockFrame{{node: parent, kind: parent.Kind}}}
-	return d.run(lines)
+	return d.run(lines, false)
 }
 
 func blockUnmatchedLine(line sourceLine) *blockLeaf {

@@ -1,12 +1,15 @@
 package markdown
 
-// blockDriver owns the resumable state of block parsing. parseBlocks currently
-// feeds all lines at once; streaming can feed complete lines incrementally.
+import "strings"
+
+// blockDriver owns the resumable state of block parsing. parseBlocks feeds all
+// lines at once; streaming feeds complete lines and keeps a one-line lookahead.
 type blockDriver struct {
 	s      *parseState
 	parent *Node
 	stack  []*blockFrame
 	leaf   *blockLeaf
+	next   int
 }
 
 func (d *blockDriver) current() *Node { return d.stack[len(d.stack)-1].node }
@@ -77,15 +80,103 @@ func (d *blockDriver) markChild() {
 	}
 }
 
-func (d *blockDriver) run(lines []sourceLine) error {
+func (d *blockDriver) feed(lines []sourceLine, closed bool) error {
+	return d.run(lines, !closed)
+}
+
+func (d *blockDriver) canProcessLast(line sourceLine) bool {
+	if d.leaf != nil {
+		switch d.leaf.kind {
+		case KindCodeBlock, KindMathBlock, KindHTMLBlock:
+			return true
+		}
+		return false
+	}
+	return streamLastLineDelimited(line)
+}
+
+func streamLastLineDelimited(line sourceLine) bool {
+	if blockBlank(line.body.text) {
+		return true
+	}
+	body := line.body.text
+	for trim := 0; trim < len(body) && trim < 3 && body[trim] == ' '; trim++ {
+		body = body[1:]
+	}
+	if strings.HasPrefix(body, "#") || strings.HasPrefix(body, "```") || strings.HasPrefix(body, "~~~") {
+		return true
+	}
+	_, _, ok, err := blockRuleMatch(line.full(), blockThematicRule())
+	return err == nil && ok
+}
+
+func (d *blockDriver) restoreLineRaws(lengths []int, endings []sourceView) {
+	count := len(d.stack)
+	if count > len(lengths) {
+		count = len(lengths)
+	}
+	for index := range count {
+		d.stack[index].raw = d.stack[index].raw[:lengths[index]]
+		d.stack[index].ending = endings[index]
+	}
+}
+
+func (d *blockDriver) tableTerminated(lines []sourceLine, index int, view sourceView, end int) (bool, error) {
+	consumed := sourceLines(view.slice(0, end))
+	count := len(consumed)
+	if count == 0 {
+		count = 1
+	}
+	for next := index + count; next < len(lines); next++ {
+		line := lines[next]
+		if blockBlank(line.body.text) {
+			return true, nil
+		}
+		interrupt, err := d.s.blockStarts(line.body, false)
+		if err != nil {
+			return false, err
+		}
+		if interrupt {
+			return true, nil
+		}
+		_, indent := blockIndent(line.body)
+		if indent >= 4 && d.s.enabled("codeIndented") {
+			return true, nil
+		}
+		_, _, ok, err := blockRuleMatch(line.full(), tableBodyRowSyntax)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (d *blockDriver) run(lines []sourceLine, streaming bool) error {
 	s := d.s
 	oldOwner, oldParagraph := s.blockOwner, s.blockParagraph
 	s.blockOwner = d.parent.token
 	s.blockParagraph = false
 	defer func() { s.blockOwner = oldOwner; s.blockParagraph = oldParagraph }()
-	for lineIndex := 0; lineIndex < len(lines); lineIndex++ {
+	for lineIndex := d.next; lineIndex < len(lines); lineIndex++ {
+		if streaming && lineIndex+1 >= len(lines) && !d.canProcessLast(lines[lineIndex]) {
+			d.next = lineIndex
+			return nil
+		}
 		original := lines[lineIndex]
 		line := original
+		var rawLens []int
+		var rawEndings []sourceView
+		if streaming {
+			rawLens = make([]int, len(d.stack))
+			rawEndings = make([]sourceView, len(d.stack))
+			for index := range d.stack {
+				rawLens[index] = len(d.stack[index].raw)
+				rawEndings[index] = d.stack[index].ending
+			}
+		}
 		matched := 1
 		var opening *blockExtensionMatch
 		s.blockParagraph = false
@@ -475,6 +566,17 @@ func (d *blockDriver) run(lines []sourceLine) error {
 				}
 				continue
 			case "table":
+				if streaming {
+					ended, err := d.tableTerminated(lines, lineIndex, view, match.end)
+					if err != nil {
+						return err
+					}
+					if !ended {
+						d.restoreLineRaws(rawLens, rawEndings)
+						d.next = lineIndex
+						return nil
+					}
+				}
 				d.markChild()
 				count, err := s.parseBlockTableMatch(token, match, view, lines[lineIndex:], d.current(), d.stack)
 				if err != nil {
@@ -546,6 +648,10 @@ func (d *blockDriver) run(lines []sourceLine) error {
 				d.stack[j].blank = true
 			}
 		}
+	}
+	d.next = len(lines)
+	if streaming {
+		return nil
 	}
 	if err := d.finishLeaf(); err != nil {
 		return err

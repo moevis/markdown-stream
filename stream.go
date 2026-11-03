@@ -7,35 +7,35 @@ import (
 )
 
 // TokenStream emits confirmed concrete tokens while input is still arriving.
-// A block is emitted only after it can no longer change: a closed fenced code
-// block, a completed ATX/Setext heading, a closed list or table, and so on.
-// Blocks with possible forward references (a "[" or "[^" candidate) and open
-// containers are held until Close. Emitted events are always a prefix of the
-// events Parse would produce for the complete input; no token is withdrawn.
+// Blocks are parsed incrementally by blockDriver; a block is emitted only after
+// it can no longer change. Blocks with possible forward references (a "[" or
+// "[^" candidate), open containers, and footnote definitions are held until
+// Close. Emitted events are always a prefix of the events Parse would produce
+// for the complete input; no token is withdrawn. Options with resolvers or
+// custom tokenizers fall back to a full parse at Close.
 //
 // TokenStream does not replace Parse or Parser.Read. It is an opt-in view for
 // consumers that need blocks earlier, not an incremental Document.
 type TokenStream struct {
 	mu      sync.Mutex
 	options Options
-	buffer  strings.Builder
 	early   bool
 
+	buffer strings.Builder
 	closed bool
 	dirty  bool
+	done   bool
 	err    error
 
-	queue   []Event
-	emitted int
-	sigs    []streamSig
-}
+	queue []Event
 
-type streamSig struct {
-	kind   EventKind
-	typ    TokenType
-	start  int
-	end    int
-	source string
+	started  bool
+	finished bool
+	source   *sourceDocument
+	document *Document
+	state    *parseState
+	driver   *blockDriver
+	fed      int
 }
 
 func streamEventSig(event Event) streamSig {
@@ -46,6 +46,14 @@ func streamEventSig(event Event) streamSig {
 		end:    event.Token.Range.End.ByteOffset,
 		source: event.Token.Source(),
 	}
+}
+
+type streamSig struct {
+	kind   EventKind
+	typ    TokenType
+	start  int
+	end    int
+	source string
 }
 
 // NewTokenStream starts a streaming token reader. It accepts the same Options
@@ -119,41 +127,163 @@ func (s *TokenStream) Next() (Event, ReadStatus, error) {
 	}
 }
 
+func (s *TokenStream) start() error {
+	if s.started {
+		return nil
+	}
+	s.source = &sourceDocument{}
+	root := makeNode(KindDocument, "document", s.source.view())
+	s.document = &Document{
+		Root:          root,
+		Definitions:   make(map[string]Definition),
+		source:        s.source,
+		options:       s.options,
+		footnotes:     make(map[string]*Node),
+		footnoteCalls: make(map[string]int),
+	}
+	s.state = newParseState(s.document, s.options)
+	s.driver = &blockDriver{s: s.state, parent: root, stack: []*blockFrame{{node: root, kind: root.Kind}}}
+	s.started = true
+	return nil
+}
+
 func (s *TokenStream) refresh() {
 	s.dirty = false
-	document, err := Parse(s.buffer.String(), s.options)
+	if !s.early {
+		if !s.closed {
+			return
+		}
+		document, err := Parse(s.buffer.String(), s.options)
+		if err != nil {
+			s.err = err
+			return
+		}
+		s.queue = append(s.queue, document.Events...)
+		return
+	}
+	if err := s.start(); err != nil {
+		s.err = err
+		return
+	}
+	decoded, err := decodeSource(s.buffer.String(), s.options.Encoding)
 	if err != nil {
 		s.err = err
 		return
 	}
-	events := document.Events
-	if len(events) < s.emitted {
-		s.err = fmt.Errorf("markdown: token stream prefix shrank")
+	*s.source = *decoded
+	lines := sourceLines(s.source.view())
+	available := len(lines)
+	if !s.closed && available > 0 {
+		last := lines[available-1]
+		if len(last.ending.text) == 0 || strings.HasSuffix(last.ending.text, "\r") {
+			available--
+		}
+	}
+	if available < s.fed {
+		s.err = fmt.Errorf("markdown: token stream line buffer regressed")
 		return
 	}
-	for index := range s.emitted {
-		if streamEventSig(events[index]) != s.sigs[index] {
-			s.err = fmt.Errorf("markdown: token stream prefix changed at event %d", index)
+	if available > s.fed {
+		if err := s.driver.feed(lines[:available], false); err != nil {
+			s.err = err
 			return
 		}
+		s.fed = available
 	}
-	safe := 0
 	if s.closed {
-		safe = len(events)
-	} else if s.early {
-		safe = streamSafeEventCount(document, s.buffer.String())
-	}
-	if safe < s.emitted {
-		s.err = fmt.Errorf("markdown: token stream prefix regressed")
+		if err := s.driver.feed(lines, true); err != nil {
+			s.err = err
+			return
+		}
+		if err := s.finish(); err != nil {
+			s.err = err
+		}
 		return
 	}
-	if safe > s.emitted {
-		s.queue = append(s.queue, events[s.emitted:safe]...)
-		for _, event := range events[s.emitted:safe] {
-			s.sigs = append(s.sigs, streamEventSig(event))
-		}
-		s.emitted = safe
+	if err := s.drain(); err != nil {
+		s.err = err
 	}
+}
+
+// drain emits safe leading top-level blocks. Each block is finalized on its own;
+// blocks without forward-reference candidates need no later definitions.
+func (s *TokenStream) drain() error {
+	root := s.document.Root.token
+	for len(root.Children) != 0 {
+		token := root.Children[0]
+		if token.node == nil {
+			s.queue = append(s.queue, appendEvents([]*Token{token}, nil)...)
+			root.Children = root.Children[1:]
+			continue
+		}
+		hasFollowing, blankAfter := streamNeighbours(root.Children[1:])
+		if !streamBlockSafe(token, hasFollowing, blankAfter, s.buffer.String()) {
+			break
+		}
+		if err := s.finalizeEarly(token); err != nil {
+			return err
+		}
+		s.queue = append(s.queue, appendEvents([]*Token{token}, nil)...)
+		root.Children = root.Children[1:]
+	}
+	return nil
+}
+
+func (s *TokenStream) finalizeEarly(token *Token) error {
+	if err := s.state.expandBlockContent(token); err != nil {
+		return err
+	}
+	if err := s.state.expandStringContent(token); err != nil {
+		return err
+	}
+	s.state.finalizeBlockValues(token)
+	if token.node != nil {
+		if err := s.state.parseDeferredInlines(token.node); err != nil {
+			return err
+		}
+	}
+	if err := s.state.expandInlineContent(token); err != nil {
+		return err
+	}
+	mergeRecordedPrefixes(token)
+	return nil
+}
+
+// finish resolves all remaining blocks in two passes: collect definitions and
+// footnotes first, then parse inlines and emit in document order.
+func (s *TokenStream) finish() error {
+	if s.finished {
+		return nil
+	}
+	root := s.document.Root.token
+	tokens := root.Children
+	for _, token := range tokens {
+		if token.node == nil {
+			continue
+		}
+		if err := s.state.expandBlockContent(token); err != nil {
+			return err
+		}
+		if err := s.state.expandStringContent(token); err != nil {
+			return err
+		}
+		s.state.finalizeBlockValues(token)
+	}
+	for _, token := range tokens {
+		if token.node != nil {
+			if err := s.state.parseDeferredInlines(token.node); err != nil {
+				return err
+			}
+			if err := s.state.expandInlineContent(token); err != nil {
+				return err
+			}
+			mergeRecordedPrefixes(token)
+		}
+		s.queue = append(s.queue, appendEvents([]*Token{token}, nil)...)
+	}
+	root.Children = nil
+	s.finished = true
+	return nil
 }
 
 // streamSyntaxStable reports whether early emission is safe for these options.
@@ -179,44 +309,6 @@ func streamSyntaxStable(options Options) bool {
 		}
 	}
 	return true
-}
-
-// streamSafeEventCount returns how many leading events are final under any
-// future input. Only complete top-level blocks and trivia before them count.
-func streamSafeEventCount(document *Document, buffer string) int {
-	end := streamSafeEnd(document, buffer)
-	if end <= 0 {
-		return 0
-	}
-	count := 0
-	for _, event := range document.Events {
-		if event.Kind == Enter {
-			if event.Token.Range.Start.ByteOffset >= end {
-				break
-			}
-		} else if event.Token.Range.End.ByteOffset > end {
-			break
-		}
-		count++
-	}
-	return count
-}
-
-func streamSafeEnd(document *Document, buffer string) int {
-	end := 0
-	tokens := document.Tokens
-	for index, token := range tokens {
-		if token.node == nil {
-			end = token.Range.End.ByteOffset
-			continue
-		}
-		hasFollowing, blankAfter := streamNeighbours(tokens[index+1:])
-		if !streamBlockSafe(token, hasFollowing, blankAfter, buffer) {
-			break
-		}
-		end = token.Range.End.ByteOffset
-	}
-	return end
 }
 
 func streamNeighbours(tokens []*Token) (hasFollowing, blankAfter bool) {
@@ -298,7 +390,7 @@ func streamBlockSafe(token *Token, hasFollowing, blankAfter bool, buffer string)
 	case KindDefinition:
 		return hasFollowing || blankAfter
 	case KindFootnoteDefinition:
-		return hasFollowing
+		return false
 	}
 	return false
 }
