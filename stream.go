@@ -1,7 +1,6 @@
 package markdown
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 )
@@ -29,13 +28,17 @@ type TokenStream struct {
 
 	queue []Event
 
-	started  bool
-	finished bool
-	source   *sourceDocument
-	document *Document
-	state    *parseState
-	driver   *blockDriver
-	fed      int
+	started       bool
+	finished      bool
+	decoder       *sourceDecoder
+	decoded       int
+	decoderClosed bool
+	lines         []sourceLine
+	lineStart     int
+	source        *sourceDocument
+	document      *Document
+	state         *parseState
+	driver        *blockDriver
 }
 
 func streamEventSig(event Event) streamSig {
@@ -131,7 +134,12 @@ func (s *TokenStream) start() error {
 	if s.started {
 		return nil
 	}
-	s.source = &sourceDocument{}
+	decoder, err := newSourceDecoder(s.options.Encoding)
+	if err != nil {
+		return err
+	}
+	s.decoder = decoder
+	s.source = decoder.Document()
 	root := makeNode(KindDocument, "document", s.source.view())
 	s.document = &Document{
 		Root:          root,
@@ -165,33 +173,18 @@ func (s *TokenStream) refresh() {
 		s.err = err
 		return
 	}
-	decoded, err := decodeSource(s.buffer.String(), s.options.Encoding)
-	if err != nil {
-		s.err = err
-		return
+	raw := s.buffer.String()
+	if len(raw) > s.decoded {
+		s.decoder.WriteString(raw[s.decoded:])
+		s.decoded = len(raw)
 	}
-	*s.source = *decoded
-	lines := sourceLines(s.source.view())
-	available := len(lines)
-	if !s.closed && available > 0 {
-		last := lines[available-1]
-		if len(last.ending.text) == 0 || strings.HasSuffix(last.ending.text, "\r") {
-			available--
-		}
+	if s.closed && !s.decoderClosed {
+		s.decoder.Close()
+		s.decoderClosed = true
 	}
-	if available < s.fed {
-		s.err = fmt.Errorf("markdown: token stream line buffer regressed")
-		return
-	}
-	if available > s.fed {
-		if err := s.driver.feed(lines[:available], false); err != nil {
-			s.err = err
-			return
-		}
-		s.fed = available
-	}
+	s.appendLines(s.closed)
 	if s.closed {
-		if err := s.driver.feed(lines, true); err != nil {
+		if err := s.driver.feed(s.lines, true); err != nil {
 			s.err = err
 			return
 		}
@@ -200,9 +193,39 @@ func (s *TokenStream) refresh() {
 		}
 		return
 	}
+	if err := s.driver.feed(s.lines, false); err != nil {
+		s.err = err
+		return
+	}
 	if err := s.drain(); err != nil {
 		s.err = err
 	}
+}
+
+func (s *TokenStream) appendLines(closed bool) {
+	text := s.source.text
+	view := s.source.view()
+	start := s.lineStart
+	for index := start; index < len(text); {
+		if text[index] != '\n' && text[index] != '\r' {
+			index++
+			continue
+		}
+		end := index + 1
+		if text[index] == '\r' && end < len(text) && text[end] == '\n' {
+			end++
+		}
+		if text[index] == '\r' && end == len(text) && !closed {
+			break
+		}
+		s.lines = append(s.lines, sourceLine{body: view.slice(start, index), ending: view.slice(index, end)})
+		start, index = end, end
+	}
+	if closed && start < len(text) {
+		s.lines = append(s.lines, sourceLine{body: view.slice(start, len(text)), ending: view.slice(len(text), len(text))})
+		start = len(text)
+	}
+	s.lineStart = start
 }
 
 // drain emits safe leading top-level blocks. Each block is finalized on its own;
@@ -217,7 +240,7 @@ func (s *TokenStream) drain() error {
 			continue
 		}
 		hasFollowing, blankAfter := streamNeighbours(root.Children[1:])
-		if !streamBlockSafe(token, hasFollowing, blankAfter, s.buffer.String()) {
+		if !streamBlockSafe(token, hasFollowing, blankAfter, s.source.raw) {
 			break
 		}
 		if err := s.finalizeEarly(token); err != nil {

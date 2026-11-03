@@ -175,8 +175,8 @@ go doc .
 负责人：主助手。状态：增量驱动已接入，按顶层块确认。
 
 - 新增 `TokenStream`：`NewTokenStream`/`Put`/`Write`/`Close`/`Next`，在输入到达时返回已确认的顶层块 token；事件始终是完整 `Parse` 事件的前缀，不撤回。
-- `TokenStream` 直接消费 `blockDriver` 的逐行状态，不再对 buffer 重跑 `Parse`；表格在 header/delimiter 确认且终止行到达后提交，不做事件撤销。
-- `Parse` 与 `Parser.Read` 保持关闭后发布，语义不变。
+- `TokenStream` 直接消费 `blockDriver` 的逐行状态，解码、分行和块解析都只处理新增输入，不再对 buffer 重跑 `Parse` 或整体解码；表格在 header/delimiter 确认且终止行到达后提交，不做事件撤销。
+- `Parse` 与 `Parser.Read` 保持关闭后发布，语义不变；`decodeSource` 复用同一增量解码器。
 - 含 `[`/`[^` 的段落、未闭合容器/代码块延迟到 `Close`；带 resolver/自定义 Tokenizer 的 Options 在 `Close` 回退到完整解析。
-- 回归：逐字节前缀断言、闭合块提前发出、前向引用保持、resolver 保守延迟、token Source 与 Range 一致；`block_driver_test` 验证逐行 feed 与整段解析等价。
+- 回归：逐字节前缀断言、闭合块提前发出、前向引用保持、resolver 保守延迟、token Source 与 Range 一致；`block_driver_test` 验证逐行 feed 与整段解析等价，`source_decode_test` 验证任意字节切分、UTF-8/UTF-16/Latin1、BOM、CRLF、非法字节和代理对。
 - 后续：`Enter table`/开 fence/ATX marker 的行级输出需要可变 token 或 revision 模型；当前按完整顶层块确认，避免“疑似 table”后撤销事件。

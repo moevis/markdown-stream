@@ -55,7 +55,7 @@ fmt.Println(html.String())
 
 ## 流式 token
 
-`NewTokenStream` 在输入仍在到达时返回已经不可变的顶层块 token；事件流始终是完整 `Parse` 事件的前缀。含 `[`/`[^` 的段落、未闭合的容器或代码块会延迟到 `Close`。
+`NewTokenStream` 在输入仍在到达时返回已经不可变的顶层块 token；事件流始终是完整 `Parse` 事件的前缀。解码、分行和块解析都按新增输入增量处理；含 `[`/`[^` 的段落、未闭合的容器或代码块会延迟到 `Close`，带 resolver/自定义 Tokenizer 的 Options 回退到完整解析。
 
 ```go
 stream := markdown.NewTokenStream()

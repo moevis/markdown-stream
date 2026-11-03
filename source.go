@@ -1,11 +1,8 @@
 package markdown
 
 import (
-	"fmt"
 	"sort"
 	"strings"
-	"unicode/utf16"
-	"unicode/utf8"
 )
 
 // Runs compress ordinary ASCII while retaining transformations as individual
@@ -27,123 +24,13 @@ type sourceDocument struct {
 }
 
 func decodeSource(raw string, encoding Encoding) (*sourceDocument, error) {
-	if encoding == "" {
-		encoding = UTF8
+	decoder, err := newSourceDecoder(encoding)
+	if err != nil {
+		return nil, err
 	}
-	switch encoding {
-	case UTF8, UTF16LE, UTF16BE, Latin1:
-	default:
-		return nil, fmt.Errorf("markdown: unsupported encoding %q", encoding)
-	}
-	d := &sourceDocument{raw: raw}
-	point := Position{Line: 1, Column: 1}
-	var builder strings.Builder
-	changed := encoding != UTF8
-	if changed {
-		builder.Grow(len(raw))
-	}
-	rawIndex, textIndex, utf8Base := 0, 0, 0
-	readRune := func(index int) (rune, int) {
-		if encoding == UTF8 {
-			return utf8.DecodeRuneInString(raw[index:])
-		}
-		if encoding == Latin1 {
-			return rune(raw[index]), 1
-		}
-		if index+1 >= len(raw) {
-			return utf8.RuneError, 1
-		}
-		unit := uint16(raw[index]) | uint16(raw[index+1])<<8
-		if encoding == UTF16BE {
-			unit = uint16(raw[index])<<8 | uint16(raw[index+1])
-		}
-		if unit >= 0xd800 && unit <= 0xdbff && index+3 < len(raw) {
-			next := uint16(raw[index+2]) | uint16(raw[index+3])<<8
-			if encoding == UTF16BE {
-				next = uint16(raw[index+2])<<8 | uint16(raw[index+3])
-			}
-			if next >= 0xdc00 && next <= 0xdfff {
-				return utf16.DecodeRune(rune(unit), rune(next)), 4
-			}
-		}
-		if unit >= 0xd800 && unit <= 0xdfff {
-			return utf8.RuneError, 2
-		}
-		return rune(unit), 2
-	}
-	for rawIndex < len(raw) {
-		r, size := readRune(rawIndex)
-		if rawIndex == 0 && r == '\ufeff' {
-			rawIndex += size
-			point.ByteOffset = rawIndex
-			utf8Base = rawIndex
-			continue
-		}
-		start := point
-		original := r
-		if r == 0 {
-			r = utf8.RuneError
-		}
-		if !changed && (original == 0 || original == utf8.RuneError && size == 1) {
-			changed = true
-			builder.Grow(len(raw) - utf8Base)
-			builder.WriteString(raw[utf8Base:rawIndex])
-		}
-		units := 1
-		if r > 0xffff {
-			units = 2
-		}
-		textSize := utf8.RuneLen(r)
-		lineEnding := r == '\r' || r == '\n'
-		crlf := false
-		if r == '\r' && rawIndex+size < len(raw) {
-			next, nextSize := readRune(rawIndex + size)
-			if next == '\n' {
-				crlf = true
-				size += nextSize
-				units++
-				textSize++
-			}
-		}
-		if changed {
-			builder.WriteRune(r)
-			if crlf {
-				builder.WriteByte('\n')
-			}
-		}
-		point.ByteOffset += size
-		point.Offset += units
-		if lineEnding {
-			point.Line++
-			point.Column = 1
-		} else if r == '\t' {
-			point.Column += 4 - (point.Column-1)%4
-		} else {
-			point.Column += units
-		}
-		linear := r >= 0x20 && r < 0x7f
-		run := sourceRun{textStart: textIndex, textEnd: textIndex + textSize, start: start, end: point, rawStep: size, linear: linear}
-		if linear && len(d.runs) != 0 {
-			last := &d.runs[len(d.runs)-1]
-			if last.linear && last.rawStep == run.rawStep && last.end == start {
-				last.textEnd = run.textEnd
-				last.end = point
-			} else {
-				d.runs = append(d.runs, run)
-			}
-		} else {
-			d.runs = append(d.runs, run)
-		}
-		rawIndex += size
-		textIndex += textSize
-	}
-	if changed {
-		d.text = builder.String()
-	} else {
-		d.text = raw[utf8Base:]
-	}
-	d.end = point
-	return d, nil
+	decoder.WriteString(raw)
+	decoder.Close()
+	return decoder.Document(), nil
 }
 
 func (d *sourceDocument) position(index int) Position {
