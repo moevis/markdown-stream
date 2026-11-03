@@ -34,7 +34,7 @@
 // and HTML to produce a /docs/intro link; without registration it is escaped text.
 //
 // Shared matchers, named constructs, and phase assembly are declared together
-// in grammar.go; synchronous and chunked parsing use that same entry point.
+// in internal/core/grammar.go; synchronous and chunked parsing use that same entry point.
 // Rule combinators are the core grammar and extension entry point. Register a
 // Construct with Rule in a SyntaxExtension dispatch table. Sequence and Or
 // transact cursor and token effects. Repeat uses max=0 for unbounded repetition,
