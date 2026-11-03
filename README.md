@@ -95,7 +95,7 @@ fmt.Println(edited.String())   // <p>edited</p>
 
 ## 扩展
 
-内置 GFM 与数学语法（`GFM()` + `GFMHTML()`，`Math()` + `MathHTML()`）；自定义语法使用同一套 `Rule` 组合子。用法、组合子说明和 `ExampleSyntaxExtension` 见 [EXTENSIONS.md](EXTENSIONS.md)。
+内置 GFM 与数学语法（`GFM()` + `GFMHTML()`，`Math()` + `MathHTML()`）；自定义语法使用同一套 `Rule` 组合子。内置元素以命名 `Construct` 组织，短规则直接呈现在元素声明中，复杂规则使用邻近的具名条件与语义动作。用法、规则组织和 `ExampleSyntaxExtension` 见 [EXTENSIONS.md](docs/EXTENSIONS.md)。
 
 ## 安装
 
