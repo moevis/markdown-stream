@@ -44,6 +44,7 @@ fmt.Println(html)
 | `Capture(kind, rule, actions...)` | 记录具体 token（允许空范围），成功后执行 `TokenAction` |
 | `OptionalCapture(kind, rule, actions...)` | 只在规则匹配时记录 token |
 | `BindCapture(kind, rule, next, actions...)` | 捕获后把 token 交给下一段规则，共用事务 |
+| `Span(kind, open, close)` | 捕获 `open`…`close` 的 token；缺少 close 整体回退，不嵌套 |
 | `Guard(predicate)` / `End()` | 不消费输入的上下文约束 / 当前逻辑作用域结束断言 |
 | `Bind(first, next)` | 根据前一匹配选择后续规则，共用事务 |
 

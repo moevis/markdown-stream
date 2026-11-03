@@ -71,3 +71,22 @@ func TestManySomeTimesAndOptionalCapture(t *testing.T) {
 		t.Fatalf("OptionalCapture present: ok=%v index=%d roots=%d", ok, context.index, len(context.roots))
 	}
 }
+
+func TestSpanCombinator(t *testing.T) {
+	rule := Span("criticAdd", "{++", "++}")
+	if context, ok := runCombinator(t, "{++hi++}", rule); !ok || context.index != 8 || len(context.roots) != 1 || context.roots[0].Type != "criticAdd" || context.roots[0].Source() != "{++hi++}" {
+		t.Fatalf("accepted: ok=%v index=%d roots=%#v", ok, context.index, context.roots)
+	}
+	if context, ok := runCombinator(t, "{++hi", rule); ok || context.index != 0 || len(context.roots) != 0 {
+		t.Fatalf("missing close: ok=%v index=%d roots=%d", ok, context.index, len(context.roots))
+	}
+	if context, ok := runCombinator(t, "{++a++}b++}", rule); !ok || context.index != 7 {
+		t.Fatalf("first close: ok=%v index=%d", ok, context.index)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("empty span delimiter must panic")
+		}
+	}()
+	Span("criticAdd", "", "++}")
+}

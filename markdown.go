@@ -194,6 +194,8 @@ func Sequence(rules ...Rule) Rule { return core.Sequence(rules...) }
 
 func Some(rule Rule) Rule { return core.Some(rule) }
 
+func Span(kind TokenType, open, close string) Rule { return core.Span(kind, open, close) }
+
 func String(text string) Rule { return core.String(text) }
 
 func Times(rule Rule, count int) Rule { return core.Times(rule, count) }

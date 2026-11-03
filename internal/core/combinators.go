@@ -321,6 +321,17 @@ func SepBy(item, separator Rule, min, max int) Rule {
 	}
 }
 
+// Span captures kind over open, body, close. The body extends to the first
+// occurrence of close; a missing close rolls back the whole span. Delimiters
+// are literal and do not nest.
+func Span(kind TokenType, open, close string) Rule {
+	if open == "" || close == "" {
+		panic("markdown: empty span delimiter")
+	}
+	end := String(close)
+	return Capture(kind, Sequence(String(open), Until(end), end))
+}
+
 // OptionalCapture records kind only when rule matches.
 func OptionalCapture(kind TokenType, rule Rule, actions ...TokenAction) Rule {
 	return Optional(Capture(kind, rule, actions...))

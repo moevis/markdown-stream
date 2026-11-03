@@ -97,6 +97,29 @@ fmt.Println(edited.String())   // <p>edited</p>
 
 内置 GFM 与数学语法（`GFM()` + `GFMHTML()`，`Math()` + `MathHTML()`）；自定义语法使用同一套 `Rule` 组合子。内置元素以命名 `Construct` 组织，短规则直接呈现在元素声明中，复杂规则使用邻近的具名条件与语义动作。用法、规则组织和 `ExampleSyntaxExtension` 见 [EXTENSIONS.md](docs/EXTENSIONS.md)。
 
+### 示例：CriticMarkup
+
+用现有组合子识别 `{++新增++}`、`{--删除--}`、`{~~旧~>新~~}`、`{>>批注<<}`，不需要自定义 Tokenizer：
+
+```go
+separator := markdown.String("~>")
+replacementEnd := markdown.String("~~}")
+criticMarkup := markdown.Or(
+	markdown.Span("criticAdd", "{++", "++}"),
+	markdown.Span("criticDelete", "{--", "--}"),
+	markdown.Capture("criticReplace", markdown.Sequence(
+		markdown.String("{~~"), markdown.Until(markdown.Or(separator, replacementEnd)),
+		separator, markdown.Until(replacementEnd), replacementEnd,
+	)),
+	markdown.Span("criticComment", "{>>", "<<}"),
+)
+syntax := markdown.SyntaxExtension{Text: map[markdown.Code][]markdown.Construct{
+	'{': {{Name: "criticMarkup", Rule: criticMarkup}},
+}}
+```
+
+将 `markdown.Options{Extensions: []markdown.SyntaxExtension{syntax}}` 传给 `Parse` 或 `NewParser` 即可启用。`Span` 捕获完整定界符与正文；缺少结束符时整体回退。四种 token 的 `Source()` 都保留定界符，替换还要求 `~>` 出现在结束符之前。
+
 ## 安装
 
 ```bash
