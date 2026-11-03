@@ -3,83 +3,8 @@ package core
 import (
 	"errors"
 	"io"
-	"reflect"
 	"testing"
 )
-
-func TestParserConfirmationAndByteBoundaries(t *testing.T) {
-	input := "😀 **字**\r\n\n[a](https://example.test)\n"
-	whole, err := Parse(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for cut := 0; cut <= len(input); cut++ {
-		parser := NewParser()
-		if err := parser.Put(input[:cut]); err != nil {
-			t.Fatal(err)
-		}
-		if _, state, err := parser.ReadNonBlocking(); err != nil || state != ReadPending {
-			t.Fatalf("unclosed input published: state %v, error %v", state, err)
-		}
-		if _, err := parser.Write([]byte(input[cut:])); err != nil {
-			t.Fatal(err)
-		}
-		if err := parser.Close(); err != nil {
-			t.Fatal(err)
-		}
-		document, err := parser.Document()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if actual := rendered(t, document); actual != rendered(t, whole) {
-			t.Fatalf("byte boundary %d changed HTML: %q", cut, actual)
-		}
-		var boundaries []struct {
-			Kind   EventKind
-			Type   TokenType
-			Range  SourceRange
-			Source string
-		}
-		for {
-			event, available, err := parser.Read()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !available {
-				break
-			}
-			boundaries = append(boundaries, struct {
-				Kind   EventKind
-				Type   TokenType
-				Range  SourceRange
-				Source string
-			}{event.Kind, event.Token.Type, event.Token.Range, event.Token.Source()})
-		}
-		var expected []struct {
-			Kind   EventKind
-			Type   TokenType
-			Range  SourceRange
-			Source string
-		}
-		for _, event := range whole.Events {
-			expected = append(expected, struct {
-				Kind   EventKind
-				Type   TokenType
-				Range  SourceRange
-				Source string
-			}{event.Kind, event.Token.Type, event.Token.Range, event.Token.Source()})
-		}
-		if !reflect.DeepEqual(boundaries, expected) {
-			t.Fatalf("byte boundary %d changed concrete source boundaries", cut)
-		}
-		if _, state, err := parser.ReadNonBlocking(); err != nil || state != ReadDone {
-			t.Fatalf("exhaustion: state %v, error %v", state, err)
-		}
-		if err := parser.Put("later"); !errors.Is(err, ErrClosed) {
-			t.Fatalf("closed write: %v", err)
-		}
-	}
-}
 
 func TestDecodedSourceKeepsOriginalBytes(t *testing.T) {
 	document, err := Parse("\ufeffa\x00b\r\n")
@@ -146,19 +71,6 @@ func TestInputAndCompilerErrorsPropagate(t *testing.T) {
 	}
 	if document, err := Parse("x", Options{Encoding: "unsupported"}); document != nil || err == nil {
 		t.Fatalf("decoder failure: document %v, error %v", document, err)
-	}
-	parser := NewParser()
-	if err := parser.Put("unfinished"); err != nil {
-		t.Fatal(err)
-	}
-	if err := parser.CloseWithError(failure); err != nil {
-		t.Fatal(err)
-	}
-	if document, err := parser.Document(); document != nil || !errors.Is(err, failure) {
-		t.Fatalf("producer failure: document %v, error %v", document, err)
-	}
-	if _, available, err := parser.Read(); available || !errors.Is(err, failure) {
-		t.Fatalf("event failure: available %v, error %v", available, err)
 	}
 	document, err := Parse("x")
 	if err != nil {

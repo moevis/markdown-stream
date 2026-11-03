@@ -28,7 +28,7 @@ fmt.Println(html)
 
 核心、GFM 与 Math 的共享匹配器、命名 `Construct` 元素和阶段注册集中在 `internal/core/grammar.go`。短 `Rule` 直接写在元素声明中；复杂规则在 `internal/core/block_rules.go`、`inline_grammar.go`、`gfm_block.go`、`gfm_inline.go` 中实现，多步骤 `TokenAction` 和上下文条件提取为具名函数，紧邻对应规则。不引入另一套元素 DSL。外部扩展仍在 `SyntaxExtension` 对应阶段按起始 `Code` 注册 `Construct{Rule: ...}`。
 
-`internal/core/blockDriver.run` 按容器续接、叶子续接、空白处理、候选匹配和开块提交编排行处理；原生块、自定义块/容器和 GFM table 分别提交。已确认的段落中断候选直接传给开块阶段，不重复匹配；table 需要更多输入时保留原有流式回退。同步与分块解析仍共用上述文法和提交机制。
+`internal/core/blockDriver.run` 按容器续接、叶子续接、空白处理、候选匹配和开块提交编排行处理；原生块、自定义块/容器和 GFM table 分别提交。已确认的段落中断候选直接传给开块阶段，不重复匹配；table 需要更多输入时保留原有流式回退。同步解析与 `TokenStream` 仍共用上述文法和提交机制。
 
 | 规则 | 行为 |
 |---|---|

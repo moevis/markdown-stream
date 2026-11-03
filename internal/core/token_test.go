@@ -142,24 +142,6 @@ func TestTokenActionErrorsStopAlternatives(t *testing.T) {
 			if document, err := Parse("@ tail", options); document != nil || !errors.Is(err, failure) {
 				t.Fatalf("action error was swallowed: document %v, error %v", document, err)
 			}
-			parser := NewParser(options)
-			for _, chunk := range []string{"@", " tail"} {
-				if err := parser.Put(chunk); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := parser.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if document, err := parser.Document(); document != nil || !errors.Is(err, failure) {
-				t.Fatalf("action error was published as a document: document %v, error %v", document, err)
-			}
-			if _, available, err := parser.Read(); available || !errors.Is(err, failure) {
-				t.Fatalf("action error was published as an event: available %v, error %v", available, err)
-			}
-			if _, status, err := parser.ReadNonBlocking(); status != ReadDone || !errors.Is(err, failure) {
-				t.Fatalf("non-blocking action error: status %v, error %v", status, err)
-			}
 		})
 	}
 }

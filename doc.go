@@ -11,18 +11,10 @@
 // end-exclusive. Positions include original byte offsets and preprocessed UTF-16
 // coordinates, with one-based lines and columns and zero-based offsets.
 //
-// NewParser collects ordered input through Put or the io.Writer method Write.
-// Close ends input; CloseWithError with a non-nil error aborts confirmation and
-// propagates the producer's error. Chunks use the same synchronous grammar as
-// Parse. Confirmed documents and events are published only after input is closed
-// and parsing succeeds, not while input is being produced. Close does not wait
-// for parsing or event consumption. Document waits without consuming the event
-// cursor. Read returns (Event, bool, error); ReadNonBlocking returns
-// (Event, ReadStatus, error), distinguishing ReadPending, ReadEvent, and ReadDone.
-// Each Parser is single-use. Writes and close are serialized; multiple event
-// readers share one cursor. Writes or repeated close after closure return ErrClosed.
-// TokenStream exposes confirmed top-level token events before Close; Parse and
-// Parser.Read still publish the complete document only after confirmation.
+// TokenStream consumes input chunks through Put or the io.Writer method Write.
+// Close ends input; Next returns ReadEvent, ReadPending, or ReadDone. Writes or
+// repeated close after closure return ErrClosed. Parse still publishes a complete
+// document only after it has parsed the whole source.
 //
 // Options registers syntax and HTML independently: pair GFM() with GFMHTML(),
 // and Math() with MathHTML(). GFM includes tables, strikethrough, task lists,

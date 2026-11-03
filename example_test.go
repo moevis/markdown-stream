@@ -2,33 +2,9 @@ package markdown_test
 
 import (
 	"fmt"
-	"strings"
 
 	markdown "github.com/moevis/markdown-stream"
 )
-
-func ExampleNewParser() {
-	parser := markdown.NewParser()
-	if err := parser.Put("**Hi"); err != nil {
-		panic(err)
-	}
-	if err := parser.Put("**"); err != nil {
-		panic(err)
-	}
-	if err := parser.Close(); err != nil {
-		panic(err)
-	}
-	document, err := parser.Document()
-	if err != nil {
-		panic(err)
-	}
-	var html strings.Builder
-	if err := markdown.RenderHTML(&html, document); err != nil {
-		panic(err)
-	}
-	fmt.Println(html.String())
-	// Output: <p><strong>Hi</strong></p>
-}
 
 // A reference syntax exists only when explicitly registered. The same
 // combinators used by the native grammar record each source-derived token.

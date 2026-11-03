@@ -13,7 +13,7 @@ import (
 // for the complete input; no token is withdrawn. Options with resolvers or
 // custom tokenizers fall back to a full parse at Close.
 //
-// TokenStream does not replace Parse or Parser.Read. It is an opt-in view for
+// TokenStream does not replace Parse. It is an opt-in view for
 // consumers that need blocks earlier, not an incremental Document.
 type TokenStream struct {
 	mu      sync.Mutex

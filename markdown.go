@@ -25,7 +25,6 @@ type (
 	Node            = core.Node
 	NodeKind        = core.NodeKind
 	Options         = core.Options
-	Parser          = core.Parser
 	Phase           = core.Phase
 	Position        = core.Position
 	ReadStatus      = core.ReadStatus
@@ -145,8 +144,6 @@ func Many(rule Rule) Rule { return core.Many(rule) }
 func Math() SyntaxExtension { return core.Math() }
 
 func MathHTML() HTMLExtension { return core.MathHTML() }
-
-func NewParser(options ...Options) *Parser { return core.NewParser(options...) }
 
 func NewTokenStream(options ...Options) *TokenStream { return core.NewTokenStream(options...) }
 
