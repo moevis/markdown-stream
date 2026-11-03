@@ -1,19 +1,16 @@
 package markdown
 
-import "strings"
-
-// This file is the grammar declaration manifest: shared matchers, syntax
-// elements, and phase registration live here so the whole grammar can be read
-// in one place. Rule bodies stay in block_rules.go, inline_grammar.go,
-// inline_resource.go, gfm_block.go, and gfm_inline.go.
+// This file declares shared matchers, named elements, and phase registration.
+// Short productions live in their element declarations. Complex rules and
+// semantic actions stay together in the block, inline, and GFM rule files.
 
 // Shared block matchers.
 var (
 	blockSpaceRule      = Satisfy(blockSpaceCode)
-	blockSpacesRule     = Repeat(blockSpaceRule, 0, 0)
+	blockSpacesRule     = Many(blockSpaceRule)
 	blockLineEndRule    = Or(End(), Lookahead(Satisfy(blockEndingCode)))
-	blockPrefixRule     = Optional(Capture("linePrefix", Repeat(blockSpaceRule, 1, 3)))
-	blockWhitespaceRule = Optional(Capture("whitespace", Repeat(blockSpaceRule, 1, 0)))
+	blockPrefixRule     = OptionalCapture("linePrefix", Repeat(blockSpaceRule, 1, 3))
+	blockWhitespaceRule = OptionalCapture("whitespace", Some(blockSpaceRule))
 	blockRestRule       = Until(blockLineEndRule)
 	blockTrailingRule   = Sequence(blockSpacesRule, blockLineEndRule)
 )
@@ -28,7 +25,7 @@ var (
 
 	blockIndentedRule = blockNative("codeIndented", Sequence(
 		Guard(func(context *TokenizeContext) bool { return !context.Interrupt }),
-		Capture("linePrefix", Repeat(blockSpaceRule, 4, 4)),
+		Capture("linePrefix", Times(blockSpaceRule, 4)),
 		Capture("codeFlowValue", blockRestRule),
 		blockEndingRule("lineEnding"),
 	), func(context *TokenizeContext, token *Token, _ *blockSyntaxMatch) {
@@ -109,29 +106,60 @@ var (
 		return code == LineFeed || code == CarriageReturn || code == CarriageReturnLineFeed
 	})
 	inlineSpaceRule      = Satisfy(func(code Code) bool { return code == ' ' || code == HorizontalTab || code == VirtualSpace })
-	inlineWhitespaceRule = Repeat(Or(Capture("lineEnding", inlineEndingRule), Capture("linePrefix", Repeat(inlineSpaceRule, 1, 0))), 0, 0)
-	inlineEscapeRule     = Sequence(String("\\"), Satisfy(func(code Code) bool { return code >= 0 && code < 128 && isASCIIPunctuation(byte(code)) }))
+	inlineWhitespaceRule = Repeat(Or(Capture("lineEnding", inlineEndingRule), Capture("linePrefix", Some(inlineSpaceRule))), 0, 0)
+	inlineEscapeRule     = Sequence(String("\\"), Satisfy(inlineEscapePunctuation))
 )
 
 // Core inline elements, registered by code below.
 var (
-	characterEscapeElem    = inlineNative("characterEscape", characterEscapeRule())
-	characterReferenceElem = inlineNative("characterReference", characterReferenceRule())
-	lineEndingElem         = inlineNative("lineEnding", Sequence(Capture("lineEnding", inlineEndingRule, inlineLiteralAction(KindSoftBreak, nil)),
-		Optional(Capture("linePrefix", Repeat(inlineSpaceRule, 1, 0)))))
-	stringLineEndingElem    = inlineNative("lineEnding", Sequence(Capture("lineEnding", inlineEndingRule), Optional(Capture("linePrefix", Repeat(inlineSpaceRule, 1, 0)))))
-	hardBreakEscapeElem     = inlineNative("hardBreakEscape", hardBreakEscapeRule())
-	codeTextElem            = inlineNative("codeText", codeTextRule('`', "codeText", KindCodeSpan))
-	attentionStarElem       = inlineNative("attention", attentionRule('*', 0))
-	attentionUnderscoreElem = inlineNative("attention", attentionRule('_', 0))
-	labelStartLinkElem      = inlineNative("labelStartLink", labelStartLinkRule())
-	labelStartImageElem     = inlineNative("labelStartImage", labelStartImageRule())
-	labelEndElem            = inlineNative("labelEnd", labelEndRule())
-	autolinkElem            = inlineNative("autolink", angleAutolinkRule())
-	htmlTextElem            = inlineNative("htmlText", htmlTextRule())
-	hardBreakTrailingElem   = inlineNative("hardBreakTrailing", hardBreakTrailingRule())
-	dataElem                = Construct{Name: "data", Rule: ordinaryDataRule(), AddAfter: true, native: true}
-	mathTextElem            = inlineNative("mathText", codeTextRule('$', "mathText", KindMathInline))
+	characterEscapeElem = Construct{
+		Name: "characterEscape",
+		Rule: Capture("characterEscape", Sequence(
+			Capture("escapeMarker", String("\\")),
+			Capture("characterEscapeValue", Satisfy(inlineEscapePunctuation)),
+		), inlineLiteralAction(KindText, func(raw string) string { return raw[1:] })),
+		native: true,
+	}
+	characterReferenceElem = Construct{Name: "characterReference", Rule: characterReferenceRule(), native: true}
+	lineEndingElem         = Construct{Name: "lineEnding", Rule: Sequence(Capture("lineEnding", inlineEndingRule, inlineLiteralAction(KindSoftBreak, nil)),
+		Optional(Capture("linePrefix", Some(inlineSpaceRule)))), native: true}
+	stringLineEndingElem = Construct{Name: "lineEnding", Rule: Sequence(Capture("lineEnding", inlineEndingRule), Optional(Capture("linePrefix", Some(inlineSpaceRule)))), native: true}
+	hardBreakEscapeElem  = Construct{
+		Name: "hardBreakEscape",
+		Rule: Sequence(
+			Capture("hardBreakEscape", Sequence(
+				Capture("hardBreakEscapeMarker", String("\\")),
+				Capture("lineEnding", inlineEndingRule),
+			), inlineLiteralAction(KindHardBreak, func(raw string) string { return raw[1:] })),
+			OptionalCapture("linePrefix", Some(inlineSpaceRule)),
+		),
+		native: true,
+	}
+	codeTextElem            = Construct{Name: "codeText", Rule: codeTextRule('`', "codeText", KindCodeSpan), native: true}
+	attentionStarElem       = Construct{Name: "attention", Rule: attentionRule('*', 0), native: true}
+	attentionUnderscoreElem = Construct{Name: "attention", Rule: attentionRule('_', 0), native: true}
+	labelStartLinkElem      = Construct{
+		Name:   "labelStartLink",
+		Rule:   Capture("labelStartLink", Capture("labelMarker", String("["))),
+		native: true,
+	}
+	labelStartImageElem = Construct{
+		Name: "labelStartImage",
+		Rule: Sequence(
+			Guard(canStartImage),
+			Capture("labelStartImage", Sequence(
+				Capture("labelImageMarker", String("!")),
+				Capture("labelMarker", String("[")),
+			)),
+		),
+		native: true,
+	}
+	labelEndElem          = Construct{Name: "labelEnd", Rule: labelEndRule(), native: true}
+	autolinkElem          = Construct{Name: "autolink", Rule: angleAutolinkRule(), native: true}
+	htmlTextElem          = Construct{Name: "htmlText", Rule: htmlTextRule(), native: true}
+	hardBreakTrailingElem = Construct{Name: "hardBreakTrailing", Rule: hardBreakTrailingRule(), native: true}
+	dataElem              = Construct{Name: "data", Rule: ordinaryDataRule(), AddAfter: true, native: true}
+	mathTextElem          = Construct{Name: "mathText", Rule: codeTextRule('$', "mathText", KindMathInline), native: true}
 )
 
 // Core inline grammar. Delimiter pairing and bracket resolution run only after
@@ -214,18 +242,16 @@ func makeGFMBlockSyntax() SyntaxExtension {
 //	www           = "www." domain path?
 //	protocol      = ("http://" | "https://") domain path?
 func gfmInlineSyntax(single bool) SyntaxExtension {
-	footnote := inlineNative("gfmFootnoteCall", footnoteCallRule())
+	footnote := Construct{Name: "gfmFootnoteCall", Rule: footnoteCallRule(), native: true}
 	minimum := 2
 	if single {
 		minimum = 1
 	}
-	strikethrough := inlineNative("strikethrough", Sequence(
-		Guard(func(context *TokenizeContext) bool {
-			return context.index == 0 || context.view.text[context.index-1] != '~' || context.inline != nil && context.inline.items.tail != nil && context.inline.items.tail.token.Type == "characterEscape"
-		}),
+	strikethrough := Construct{Name: "strikethrough", Rule: Sequence(
+		Guard(canStartStrikethrough),
 		Capture("strikethroughSequence", Repeat(String("~"), minimum, 2), inlineLiteralAction(KindText, nil)),
 		Not(String("~")),
-	))
+	), native: true}
 	extension := SyntaxExtension{
 		Text: map[Code][]Construct{
 			'~': {strikethrough},
@@ -233,22 +259,26 @@ func gfmInlineSyntax(single bool) SyntaxExtension {
 		},
 		AttentionMarkers: []Code{'~'}, features: featureGFM,
 	}
-	email := inlineNative("emailAutolink", literalEmailRule())
-	email.Previous = func(code Code) bool { return code != '/' && !gfmAtext(code) }
+	email := Construct{
+		Name: "emailAutolink", Rule: literalEmailRule(),
+		Previous: canFollowEmailAutolink, native: true,
+	}
 	for code := Code(0); code < 128; code++ {
 		if gfmAtext(code) {
 			extension.Text[code] = append(extension.Text[code], email)
 		}
 	}
-	www := inlineNative("wwwAutolink", literalURLRule(true))
-	www.Previous = func(code Code) bool {
-		return code == EOF || inlineCodeWhitespace(code) || strings.ContainsRune("(*_[]~", rune(code))
+	www := Construct{
+		Name: "wwwAutolink", Rule: literalURLRule(true),
+		Previous: canFollowWwwAutolink, native: true,
 	}
 	for _, code := range [2]Code{'w', 'W'} {
 		extension.Text[code] = append(extension.Text[code], www)
 	}
-	protocol := inlineNative("protocolAutolink", literalURLRule(false))
-	protocol.Previous = func(code Code) bool { return !inlineAlphaCode(code) }
+	protocol := Construct{
+		Name: "protocolAutolink", Rule: literalURLRule(false),
+		Previous: canFollowProtocolAutolink, native: true,
+	}
 	for _, code := range [2]Code{'h', 'H'} {
 		extension.Text[code] = append(extension.Text[code], protocol)
 	}

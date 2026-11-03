@@ -34,10 +34,14 @@ fmt.Println(html)
 | `Runes(set)` / `Satisfy(predicate)` / `Any()` | 消费集合中一个 rune / 满足谓词的一个预处理 code / 任意一个预处理 code |
 | `Sequence(rules...)` / `Or(rules...)` | 全部按序成功才提交 / 按顺序尝试分支 |
 | `Repeat(rule, min, max)` | 重复 min–max 次，max 为 0 表示无上限；非法范围 panic，零宽成功导致解析错误 |
+| `Many(rule)` / `Some(rule)` / `Times(rule, n)` | 0+ / 1+ / 恰好 n 次 |
+| `SepBy(item, separator, min, max)` | 用 separator 分隔 item；分隔符后没有 item 时回退分隔符 |
 | `Optional(rule)` | 可缺省；成功时提交，包括零宽断言，失败时恢复匹配效果 |
 | `Lookahead(rule)` / `Not(rule)` | 测试匹配 / 不匹配，不提交游标或 token 效果 |
 | `Until(terminator)` | 消费到终止规则之前，不消费终止符；可跨行，缺少终止符时整体回退 |
 | `Capture(kind, rule, actions...)` | 记录具体 token（允许空范围），成功后执行 `TokenAction` |
+| `OptionalCapture(kind, rule, actions...)` | 只在规则匹配时记录 token |
+| `BindCapture(kind, rule, next, actions...)` | 捕获后把 token 交给下一段规则，共用事务 |
 | `Guard(predicate)` / `End()` | 不消费输入的上下文约束 / 当前逻辑作用域结束断言 |
 | `Bind(first, next)` | 根据前一匹配选择后续规则，共用事务 |
 

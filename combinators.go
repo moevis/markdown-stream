@@ -263,5 +263,80 @@ func Bind(first Rule, next func(*TokenizeContext) Rule) Rule {
 	}
 }
 
+// Many matches zero or more occurrences of rule.
+func Many(rule Rule) Rule { return Repeat(rule, 0, 0) }
+
+// Some matches one or more occurrences of rule.
+func Some(rule Rule) Rule { return Repeat(rule, 1, 0) }
+
+// Times matches exactly count occurrences of rule.
+func Times(rule Rule, count int) Rule { return Repeat(rule, count, count) }
+
+// SepBy matches item separated by separator. min and max count items, not
+// separators; max=0 means unbounded. A separator without a following item is
+// rolled back, as is the whole rule when fewer than min items match.
+func SepBy(item, separator Rule, min, max int) Rule {
+	if min < 0 || max < 0 || max != 0 && max < min {
+		panic("markdown: invalid separated bounds")
+	}
+	return func(context *TokenizeContext, effects *Effects) bool {
+		checkpoint := context.snapshot()
+		count := 0
+		if min == 0 {
+			first := context.snapshot()
+			if item == nil || !item(context, effects) {
+				context.restore(&first)
+				return context.err == nil
+			}
+			count = 1
+		} else {
+			if item == nil || !item(context, effects) {
+				context.restore(&checkpoint)
+				return false
+			}
+			count = 1
+		}
+		for max == 0 || count < max {
+			separatorStart := context.snapshot()
+			if separator == nil || !separator(context, effects) {
+				context.restore(&separatorStart)
+				break
+			}
+			if item == nil || !item(context, effects) {
+				context.restore(&separatorStart)
+				break
+			}
+			if separatorStart.index == context.index && separatorStart.virtual == context.virtual {
+				context.Fail(fmt.Errorf("markdown: separated item matched without consuming input"))
+				context.restore(&checkpoint)
+				return false
+			}
+			count++
+		}
+		if count < min || context.err != nil {
+			context.restore(&checkpoint)
+			return false
+		}
+		return true
+	}
+}
+
+// OptionalCapture records kind only when rule matches.
+func OptionalCapture(kind TokenType, rule Rule, actions ...TokenAction) Rule {
+	return Optional(Capture(kind, rule, actions...))
+}
+
+// BindCapture captures kind around rule, then builds the next rule from the
+// captured token. Both matches share one transaction.
+func BindCapture(kind TokenType, rule Rule, next func(*TokenizeContext, *Token) Rule, actions ...TokenAction) Rule {
+	return Bind(Capture(kind, rule, actions...), func(context *TokenizeContext) Rule {
+		token := inlineLastCaptured(context)
+		if token == nil || token.Type != kind {
+			return nil
+		}
+		return next(context, token)
+	})
+}
+
 // FoldedString matches ASCII case-insensitively, as required by HTML grammar.
 func FoldedString(text string) Rule { return literalRule(text, true) }

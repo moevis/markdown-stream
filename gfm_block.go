@@ -4,44 +4,32 @@ package markdown
 // inside code spans; inline parsing therefore never decides row structure.
 func tableCellRule(kind TokenType) Rule {
 	atom := Or(Sequence(String("\\"), Runes("\\|")), Satisfy(func(code Code) bool { return code != '|' && !blockEndingCode(code) }))
-	return Capture(kind, Repeat(atom, 0, 0))
+	return Capture(kind, Many(atom))
 }
 
 func tableRowRule(kind TokenType) Rule {
 	divider := Capture("tableCellDivider", String("|"))
 	cell := tableCellRule("tableCellSource")
 	return Capture(kind, Sequence(
-		blockPrefixRule, Optional(divider), cell,
-		Repeat(Sequence(divider, cell), 0, 0),
+		blockPrefixRule, Optional(divider), SepBy(cell, divider, 1, 0),
 		blockLineEndRule, blockEndingRule("lineEnding"),
 	))
 }
 
 func tableDelimiterRule() Rule {
-	marker := Optional(Capture("tableDelimiterMarker", String(":")))
+	marker := OptionalCapture("tableDelimiterMarker", String(":"))
 	cell := Capture("tableDelimiterCell", Sequence(
 		blockWhitespaceRule, marker,
-		Capture("tableDelimiterFiller", Repeat(String("-"), 1, 0)),
+		Capture("tableDelimiterFiller", Some(String("-"))),
 		marker, blockWhitespaceRule,
 	))
 	divider := Capture("tableCellDivider", String("|"))
 	more := Sequence(divider, Not(Sequence(blockSpacesRule, blockLineEndRule)), cell)
-	start := Guard(func(context *TokenizeContext) bool {
-		view := blockRemaining(context)
-		_, indent := blockIndent(view)
-		if context.parser.enabled("codeIndented") && indent >= 4 {
-			return false
-		}
-		interrupt, err := context.parser.blockStarts(view, true)
-		if err != nil {
-			context.Fail(err)
-		}
-		return !interrupt && err == nil
-	})
+	start := Guard(canStartTableDelimiter)
 	return Capture("tableDelimiterRow", Sequence(
 		start,
 		Capture("linePrefix", blockWhitespaceRule), Optional(divider), cell,
-		Repeat(more, 0, 0), Optional(divider), blockWhitespaceRule,
+		Many(more), Optional(divider), blockWhitespaceRule,
 		blockLineEndRule, blockEndingRule("lineEnding"),
 	))
 }
@@ -65,52 +53,72 @@ func tableSourceCells(row *Token) []*Token {
 	return cells
 }
 
-func tableRule() Rule {
-	start := Guard(func(context *TokenizeContext) bool {
-		_, indent := blockIndent(context.view.slice(context.index, len(context.view.text)))
-		return !context.Interrupt && indent < 4
-	})
-	header := Sequence(start, tableRowRule("tableHeaderRow"))
-	delimiter := Bind(header, func(*TokenizeContext) Rule {
-		return Sequence(tableDelimiterRule(), Guard(func(context *TokenizeContext) bool {
-			root := context.stack[len(context.stack)-1].token
-			header := blockCaptured(root, "tableHeaderRow")
-			delimiter := blockCaptured(root, "tableDelimiterRow")
-			cells := tableSourceCells(header)
-			if len(cells) != len(blockCapturedAll(delimiter, "tableDelimiterCell", nil)) {
-				return false
-			}
-			// A lone pipe (ignoring layout) is not a header. Any content,
-			// or two pipes enclosing an empty cell, is a valid header.
-			meaningful := len(blockCapturedAll(header, "tableCellDivider", nil)) > 1
-			for _, cell := range cells {
-				if !blockBlank(cell.view.text) {
-					meaningful = true
-				}
-			}
-			return meaningful && (blockCaptured(delimiter, "tableCellDivider") != nil || blockCaptured(delimiter, "tableDelimiterMarker") != nil)
-		}))
-	})
-	return blockNative("table", delimiter, func(context *TokenizeContext, token *Token, match *blockSyntaxMatch) {
-		delimiter := blockCaptured(token, "tableDelimiterRow")
-		for _, cell := range blockCapturedAll(delimiter, "tableDelimiterCell", nil) {
-			markers := blockCapturedAll(cell, "tableDelimiterMarker", nil)
-			alignment := AlignNone
-			if len(markers) == 2 {
-				alignment = AlignCenter
-			} else if len(markers) == 1 {
-				filler := blockCaptured(cell, "tableDelimiterFiller")
-				if markers[0].Range.Start.ByteOffset < filler.Range.Start.ByteOffset {
-					alignment = AlignLeft
-				} else {
-					alignment = AlignRight
-				}
-			}
-			match.align = append(match.align, alignment)
+func canStartTableDelimiter(context *TokenizeContext) bool {
+	view := blockRemaining(context)
+	_, indent := blockIndent(view)
+	if context.parser.enabled("codeIndented") && indent >= 4 {
+		return false
+	}
+	interrupt, err := context.parser.blockStarts(view, true)
+	if err != nil {
+		context.Fail(err)
+	}
+	return !interrupt && err == nil
+}
+
+func canStartTable(context *TokenizeContext) bool {
+	_, indent := blockIndent(context.view.slice(context.index, len(context.view.text)))
+	return !context.Interrupt && indent < 4
+}
+
+func tableDelimiterContinuation(*TokenizeContext) Rule {
+	return Sequence(tableDelimiterRule(), Guard(validTableHeader))
+}
+
+func validTableHeader(context *TokenizeContext) bool {
+	root := context.stack[len(context.stack)-1].token
+	header := blockCaptured(root, "tableHeaderRow")
+	delimiter := blockCaptured(root, "tableDelimiterRow")
+	cells := tableSourceCells(header)
+	if len(cells) != len(blockCapturedAll(delimiter, "tableDelimiterCell", nil)) {
+		return false
+	}
+	// A lone pipe (ignoring layout) is not a header. Any content,
+	// or two pipes enclosing an empty cell, is a valid header.
+	meaningful := len(blockCapturedAll(header, "tableCellDivider", nil)) > 1
+	for _, cell := range cells {
+		if !blockBlank(cell.view.text) {
+			meaningful = true
 		}
-		n := context.Node(token)
-		n.Kind, n.Alignments = KindTable, match.align
-	})
+	}
+	return meaningful && (blockCaptured(delimiter, "tableCellDivider") != nil || blockCaptured(delimiter, "tableDelimiterMarker") != nil)
+}
+
+func tableAction(context *TokenizeContext, token *Token, match *blockSyntaxMatch) {
+	delimiter := blockCaptured(token, "tableDelimiterRow")
+	for _, cell := range blockCapturedAll(delimiter, "tableDelimiterCell", nil) {
+		markers := blockCapturedAll(cell, "tableDelimiterMarker", nil)
+		alignment := AlignNone
+		if len(markers) == 2 {
+			alignment = AlignCenter
+		} else if len(markers) == 1 {
+			filler := blockCaptured(cell, "tableDelimiterFiller")
+			if markers[0].Range.Start.ByteOffset < filler.Range.Start.ByteOffset {
+				alignment = AlignLeft
+			} else {
+				alignment = AlignRight
+			}
+		}
+		match.align = append(match.align, alignment)
+	}
+	n := context.Node(token)
+	n.Kind, n.Alignments = KindTable, match.align
+}
+
+func tableRule() Rule {
+	header := Sequence(Guard(canStartTable), tableRowRule("tableHeaderRow"))
+	delimiter := Bind(header, tableDelimiterContinuation)
+	return blockNative("table", delimiter, tableAction)
 }
 
 func footnoteDefinitionRule() Rule {
@@ -118,20 +126,13 @@ func footnoteDefinitionRule() Rule {
 		Sequence(String("\\"), Runes("[]\\")),
 		Satisfy(func(code Code) bool { return code != '[' && code != ']' && !inlineCodeWhitespace(code) }),
 	)
-	label := Capture("footnoteDefinitionLabel", Repeat(labelAtom, 1, 0), Content(ContentString))
+	label := Capture("footnoteDefinitionLabel", Some(labelAtom), Content(ContentString))
 	prefix := Capture("footnoteDefinitionPrefix", Sequence(
 		Capture("footnoteDefinitionMarker", String("[^")),
-		Bind(label, func(context *TokenizeContext) Rule {
-			label := inlineLastCaptured(context)
-			return Guard(func(*TokenizeContext) bool { return utf16Length(label.view.text) <= 999 })
-		}),
+		Bind(label, footnoteDefinitionLabelContinuation),
 		Capture("footnoteDefinitionMarker", String("]:")),
 	))
-	return blockNative("footnoteDefinition", Sequence(blockPrefixRule, prefix, blockWhitespaceRule), func(context *TokenizeContext, token *Token, _ *blockSyntaxMatch) {
-		n := context.Node(token)
-		n.Kind, n.Label = KindFootnoteDefinition, blockCaptured(token, "footnoteDefinitionLabel").view.text
-		n.Identifier = normalizeIdentifier(n.Label)
-	})
+	return blockNative("footnoteDefinition", Sequence(blockPrefixRule, prefix, blockWhitespaceRule), footnoteDefinitionAction)
 }
 
 func taskListRule() Rule {
@@ -144,19 +145,34 @@ func taskListRule() Rule {
 		Capture("taskListCheckValueChecked", Runes("xX")),
 		Capture("taskListCheckValueUnchecked", unchecked),
 	)
-	firstParagraph := Guard(func(context *TokenizeContext) bool {
-		owner := context.parser.blockOwner
-		return owner != nil && owner.node != nil && owner.node.Kind == KindListItem && blockFirstParagraph(owner.node)
-	})
+	firstParagraph := Guard(canStartTaskListCheck)
 	check := Capture("taskListCheck", Sequence(
 		Capture("taskListCheckMarker", String("[")), value,
 		Capture("taskListCheckMarker", String("]")),
 	))
 	prefix := Sequence(firstParagraph, check, Lookahead(separator))
-	return blockNative("taskListCheckPrefix", prefix, func(_ *TokenizeContext, token *Token, match *blockSyntaxMatch) {
-		match.kind = "taskListCheck"
-		token.Data = map[string]any{"checked": blockCaptured(token, "taskListCheckValueChecked") != nil}
-	})
+	return blockNative("taskListCheckPrefix", prefix, taskListCheckAction)
+}
+
+func footnoteDefinitionLabelContinuation(context *TokenizeContext) Rule {
+	label := inlineLastCaptured(context)
+	return Guard(func(*TokenizeContext) bool { return utf16Length(label.view.text) <= 999 })
+}
+
+func footnoteDefinitionAction(context *TokenizeContext, token *Token, _ *blockSyntaxMatch) {
+	n := context.Node(token)
+	n.Kind, n.Label = KindFootnoteDefinition, blockCaptured(token, "footnoteDefinitionLabel").view.text
+	n.Identifier = normalizeIdentifier(n.Label)
+}
+
+func canStartTaskListCheck(context *TokenizeContext) bool {
+	owner := context.parser.blockOwner
+	return owner != nil && owner.node != nil && owner.node.Kind == KindListItem && blockFirstParagraph(owner.node)
+}
+
+func taskListCheckAction(_ *TokenizeContext, token *Token, match *blockSyntaxMatch) {
+	match.kind = "taskListCheck"
+	token.Data = map[string]any{"checked": blockCaptured(token, "taskListCheckValueChecked") != nil}
 }
 
 func (s *parseState) registerBlockFootnote(node *Node) {

@@ -6,7 +6,7 @@ func destinationBodyRule(depth int) Rule {
 	var nested Rule
 	if depth < 32 {
 		nested = Bind(String("("), func(*TokenizeContext) Rule {
-			return Sequence(Repeat(destinationBodyRule(depth+1), 0, 0), String(")"))
+			return Sequence(Many(destinationBodyRule(depth+1)), String(")"))
 		})
 	}
 	return Or(inlineEscapeRule, nested, ordinary)
@@ -31,12 +31,12 @@ func destinationRule(prefix string, allowEmpty bool) Rule {
 }
 
 func titleRule(prefix string) Rule {
-	return Capture(TokenType(prefix), Bind(Capture(TokenType(prefix+"Marker"), Runes("\"'(")), func(context *TokenizeContext) Rule {
-		marker := context.view.text[context.index-1]
+	return Capture(TokenType(prefix), BindCapture(TokenType(prefix+"Marker"), Runes("\"'("), func(_ *TokenizeContext, markerToken *Token) Rule {
+		marker := markerToken.view.text[0]
 		if marker == '(' {
 			marker = ')'
 		}
-		ending := Sequence(inlineEndingRule, Repeat(inlineSpaceRule, 0, 0), Not(inlineEndingRule))
+		ending := Sequence(inlineEndingRule, Many(inlineSpaceRule), Not(inlineEndingRule))
 		body := Repeat(Or(inlineEscapeRule, ending, Satisfy(func(code Code) bool {
 			return code != Code(marker) && (marker != ')' || code != '(') && code != LineFeed && code != CarriageReturn && code != CarriageReturnLineFeed
 		})), 0, 0)
@@ -57,11 +57,10 @@ func resourceRule() Rule {
 func referenceLabelRule(prefix string) Rule {
 	return Capture(TokenType(prefix), Sequence(
 		Capture(TokenType(prefix+"Marker"), String("[")),
-		Bind(Capture(TokenType(prefix+"String"), Repeat(Or(
+		BindCapture(TokenType(prefix+"String"), Some(Or(
 			Sequence(String("\\"), Runes("[]\\")),
 			Satisfy(func(code Code) bool { return code != '[' && code != ']' }),
-		), 1, 0)), func(context *TokenizeContext) Rule {
-			token := inlineLastCaptured(context)
+		)), func(_ *TokenizeContext, token *Token) Rule {
 			return Guard(func(*TokenizeContext) bool {
 				return utf16Length(token.view.text) <= 999 && normalizeIdentifier(token.view.text) != ""
 			})

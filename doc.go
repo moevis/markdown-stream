@@ -39,13 +39,16 @@
 // Construct with Rule in a SyntaxExtension dispatch table. Sequence and Or
 // transact cursor and token effects. Repeat uses max=0 for unbounded repetition,
 // panics on invalid bounds, and reports zero-width success as a parsing error.
-// Optional commits successful matches, including zero-width assertions, and
-// restores absent branches. Lookahead and Not do not commit cursor or token
-// effects. Until consumes up to but not including its terminator, can cross line
-// endings, and rolls back when no terminator matches. Capture records concrete
-// tokens, then runs TokenAction callbacks. Their errors stop parsing rather
-// than falling through Or. Content returns a TokenAction that delegates the
-// captured body to the native grammar.
+// Many, Some, and Times alias common repetition counts; SepBy adds separated
+// repetition. Optional commits successful matches, including zero-width
+// assertions, and restores absent branches. Lookahead and Not do not commit
+// cursor or token effects. Until consumes up to but not including its
+// terminator, can cross line endings, and rolls back when no terminator
+// matches. Capture records concrete tokens, then runs TokenAction callbacks;
+// OptionalCapture records only on a match, and BindCapture passes the captured
+// token to the dependent rule. Action errors stop parsing rather than falling
+// through Or. Content returns a TokenAction that delegates the captured body to
+// the native grammar.
 //
 // Complex constructs may use Rule.Tokenizer or State and Effects directly.
 // Effects owns cursor movement, token boundaries, transactional Attempt, and

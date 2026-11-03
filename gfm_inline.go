@@ -8,19 +8,39 @@ import (
 func footnoteCallRule() Rule {
 	return Capture("gfmFootnoteCall", Sequence(
 		Capture("gfmFootnoteCallLabelMarker", String("[")), Capture("gfmFootnoteCallMarker", String("^")),
-		Bind(Capture("gfmFootnoteCallString", Repeat(Or(Sequence(String("\\"), Runes("[]\\")), Satisfy(func(code Code) bool {
+		BindCapture("gfmFootnoteCallString", Some(Or(Sequence(String("\\"), Runes("[]\\")), Satisfy(func(code Code) bool {
 			return code != '[' && code != ']' && !inlineCodeWhitespace(code)
-		})), 1, 0)), func(context *TokenizeContext) Rule {
-			label := inlineLastCaptured(context).view.text
-			return Guard(func(context *TokenizeContext) bool {
-				if utf16Length(label) > 999 {
-					return false
-				}
-				_, defined := context.Document.footnotes[normalizeIdentifier(label)]
-				return defined
-			})
+		}))), func(_ *TokenizeContext, label *Token) Rule {
+			return footnoteCallLabelContinuation(label)
 		}), Capture("gfmFootnoteCallLabelMarker", String("]")),
 	))
+}
+
+func footnoteCallLabelContinuation(label *Token) Rule {
+	text := label.view.text
+	return Guard(func(context *TokenizeContext) bool {
+		if utf16Length(text) > 999 {
+			return false
+		}
+		_, defined := context.Document.footnotes[normalizeIdentifier(text)]
+		return defined
+	})
+}
+
+func canStartStrikethrough(context *TokenizeContext) bool {
+	return context.index == 0 || context.view.text[context.index-1] != '~' || context.inline != nil && context.inline.items.tail != nil && context.inline.items.tail.token.Type == "characterEscape"
+}
+
+func canFollowEmailAutolink(code Code) bool {
+	return code != '/' && !gfmAtext(code)
+}
+
+func canFollowWwwAutolink(code Code) bool {
+	return code == EOF || inlineCodeWhitespace(code) || strings.ContainsRune("(*_[]~", rune(code))
+}
+
+func canFollowProtocolAutolink(code Code) bool {
+	return !inlineAlphaCode(code)
 }
 
 func inlineDefinedFootnoteAt(context *TokenizeContext, index int) bool {
@@ -69,28 +89,32 @@ func gfmPreviousWww(r rune, eof bool) bool {
 
 func literalLinkGuard(www bool, email bool) Rule {
 	return Guard(func(context *TokenizeContext) bool {
-		if context.inline != nil && context.inline.bracket != nil {
-			return false
-		}
-		index := context.index
-		var previous rune
-		if index > 0 {
-			previous, _ = utf8.DecodeLastRuneInString(context.view.text[:index])
-		}
-		if email {
-			return index == 0 || previous != '/' && !gfmAtext(Code(previous))
-		}
-		if www {
-			return gfmPreviousWww(previous, index == 0)
-		}
-		return !inlineAlphaCode(Code(previous))
+		return canStartLiteralLink(context, www, email)
 	})
+}
+
+func canStartLiteralLink(context *TokenizeContext, www bool, email bool) bool {
+	if context.inline != nil && context.inline.bracket != nil {
+		return false
+	}
+	index := context.index
+	var previous rune
+	if index > 0 {
+		previous, _ = utf8.DecodeLastRuneInString(context.view.text[:index])
+	}
+	if email {
+		return index == 0 || canFollowEmailAutolink(Code(previous))
+	}
+	if www {
+		return gfmPreviousWww(previous, index == 0)
+	}
+	return canFollowProtocolAutolink(Code(previous))
 }
 
 func literalEmailRule() Rule {
 	domainPart := Repeat(Or(Satisfy(inlineAlphanumericCode), Runes("-_")), 1, 0)
 	return Sequence(literalLinkGuard(false, true), Capture("literalAutolink", Capture("literalAutolinkEmail", Sequence(
-		Repeat(Satisfy(gfmAtext), 1, 0), String("@"), domainPart,
+		Some(Satisfy(gfmAtext)), String("@"), domainPart,
 		Repeat(Sequence(String("."), Lookahead(Satisfy(inlineAlphanumericCode)), domainPart), 1, 0),
 		Guard(func(context *TokenizeContext) bool { return inlineAlphaCode(context.Previous) }),
 	), inlineLiteralAction(KindText, nil)), literalLinkAction("mailto:")))
@@ -102,7 +126,7 @@ func literalURLTrailRule() Rule {
 	boundary := Or(End(), Lookahead(Satisfy(func(code Code) bool {
 		return code == '<' || inlineCodeWhitespace(code) || code >= 0 && isUnicodeWhitespace(rune(code))
 	})))
-	entity := Sequence(String("&"), Repeat(Satisfy(inlineAlphaCode), 1, 0), String(";"))
+	entity := Sequence(String("&"), Some(Satisfy(inlineAlphaCode)), String(";"))
 	punctuation := Runes("!\"')*,.:;?_~")
 	bracketBoundary := Sequence(String("]"), Or(End(), Lookahead(Runes("([")), boundary))
 	return Lookahead(Sequence(Repeat(Or(punctuation, entity, Sequence(Not(bracketBoundary), String("]"))), 0, 0), Or(boundary, bracketBoundary)))
@@ -113,42 +137,7 @@ func literalURLRule(www bool) Rule {
 	if www {
 		prefix, kind = Lookahead(Sequence(FoldedString("www."), Not(End()))), "literalAutolinkWww"
 	}
-	return Sequence(literalLinkGuard(www, false), Capture("literalAutolink", Capture(kind, Bind(prefix, func(context *TokenizeContext) Rule {
-		start := context.index
-		trail := literalURLTrailRule()
-		domainCharacter := Satisfy(func(code Code) bool {
-			return code >= 0 && !isUnicodeWhitespace(rune(code)) && code > 0x20 && (code == '-' || code == '.' || code == '_' || !isUnicodePunctuation(rune(code)))
-		})
-		domain := Sequence(Lookahead(Satisfy(func(code Code) bool {
-			return code > 0x20 && code != 0x7f && !isUnicodeWhitespace(rune(code)) && !isUnicodePunctuation(rune(code))
-		})),
-			Repeat(Sequence(Not(trail), domainCharacter), 1, 0), Guard(func(context *TokenizeContext) bool {
-				raw := context.view.text[start:context.index]
-				lastDot := strings.LastIndexByte(raw, '.')
-				previousDot := -1
-				if lastDot >= 0 {
-					previousDot = strings.LastIndexByte(raw[:lastDot], '.')
-				}
-				if strings.Contains(raw[previousDot+1:], "_") {
-					return false
-				}
-				return strings.Trim(raw, ".-_") != ""
-			}))
-		return Bind(domain, func(context *TokenizeContext) Rule {
-			pathStart := context.index
-			balancedClosing := Guard(func(context *TokenizeContext) bool {
-				if context.Peek() != ')' {
-					return false
-				}
-				raw := context.view.text[pathStart:context.index]
-				return strings.Count(raw, "(") > strings.Count(raw, ")")
-			})
-			pathCharacter := Satisfy(func(code Code) bool {
-				return code != '<' && !inlineCodeWhitespace(code) && (code < 0 || !isUnicodeWhitespace(rune(code)))
-			})
-			return Repeat(Sequence(Or(balancedClosing, Not(trail)), pathCharacter), 0, 0)
-		})
-	}), inlineLiteralAction(KindText, nil)), literalLinkAction(func() string {
+	return Sequence(literalLinkGuard(www, false), Capture("literalAutolink", Capture(kind, Bind(prefix, literalURLDomainContinuation), inlineLiteralAction(KindText, nil)), literalLinkAction(func() string {
 		if www {
 			return "http://"
 		}
@@ -156,11 +145,70 @@ func literalURLRule(www bool) Rule {
 	}())))
 }
 
+func literalURLDomainContinuation(context *TokenizeContext) Rule {
+	start := context.index
+	trail := literalURLTrailRule()
+	domainCharacter := Satisfy(literalURLDomainCode)
+	domain := Sequence(Lookahead(Satisfy(literalURLDomainStartCode)),
+		Repeat(Sequence(Not(trail), domainCharacter), 1, 0), Guard(func(context *TokenizeContext) bool {
+			return validLiteralURLDomain(context, start)
+		}))
+	return Bind(domain, func(context *TokenizeContext) Rule {
+		return literalURLPathContinuation(context, trail)
+	})
+}
+
+func literalURLDomainCode(code Code) bool {
+	return code >= 0 && !isUnicodeWhitespace(rune(code)) && code > 0x20 && (code == '-' || code == '.' || code == '_' || !isUnicodePunctuation(rune(code)))
+}
+
+func literalURLDomainStartCode(code Code) bool {
+	return code > 0x20 && code != 0x7f && !isUnicodeWhitespace(rune(code)) && !isUnicodePunctuation(rune(code))
+}
+
+func validLiteralURLDomain(context *TokenizeContext, start int) bool {
+	raw := context.view.text[start:context.index]
+	lastDot := strings.LastIndexByte(raw, '.')
+	previousDot := -1
+	if lastDot >= 0 {
+		previousDot = strings.LastIndexByte(raw[:lastDot], '.')
+	}
+	if strings.Contains(raw[previousDot+1:], "_") {
+		return false
+	}
+	return strings.Trim(raw, ".-_") != ""
+}
+
+func literalURLPathContinuation(context *TokenizeContext, trail Rule) Rule {
+	pathStart := context.index
+	balancedClosing := Guard(func(context *TokenizeContext) bool {
+		return canConsumeLiteralURLClosing(context, pathStart)
+	})
+	pathCharacter := Satisfy(literalURLPathCode)
+	return Repeat(Sequence(Or(balancedClosing, Not(trail)), pathCharacter), 0, 0)
+}
+
+func canConsumeLiteralURLClosing(context *TokenizeContext, pathStart int) bool {
+	if context.Peek() != ')' {
+		return false
+	}
+	raw := context.view.text[pathStart:context.index]
+	return strings.Count(raw, "(") > strings.Count(raw, ")")
+}
+
+func literalURLPathCode(code Code) bool {
+	return code != '<' && !inlineCodeWhitespace(code) && (code < 0 || !isUnicodeWhitespace(rune(code)))
+}
+
 func literalLinkAction(prefix string) TokenAction {
 	return func(context *TokenizeContext, token *Token) error {
-		node := context.Node(token)
-		node.Kind, node.input, node.Destination = KindLink, token.view, prefix+token.view.text
-		node.AppendChild(token.Children[0].node)
-		return nil
+		return applyLiteralLink(context, token, prefix)
 	}
+}
+
+func applyLiteralLink(context *TokenizeContext, token *Token, prefix string) error {
+	node := context.Node(token)
+	node.Kind, node.input, node.Destination = KindLink, token.view, prefix+token.view.text
+	node.AppendChild(token.Children[0].node)
+	return nil
 }
