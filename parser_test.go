@@ -1,269 +1,173 @@
 package markdown
 
 import (
-	"fmt"
-	"slices"
-	"strings"
+	"errors"
+	"io"
+	"reflect"
 	"testing"
-	"time"
 )
 
-type typedText struct {
-	typeName ElemType
-	text     string
-}
-
-func segments(parts ...typedText) []MarkdownSegment {
-	var result []MarkdownSegment
-	for _, part := range parts {
-		for _, r := range part.text {
-			result = append(result, MarkdownSegment{Type: part.typeName, Rune: r})
-		}
+func TestParserConfirmationAndByteBoundaries(t *testing.T) {
+	input := "😀 **字**\r\n\n[a](https://example.test)\n"
+	whole, err := Parse(input)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return result
-}
-
-func parseChunks(t *testing.T, root MarkdownElem, chunks ...string) []MarkdownSegment {
-	t.Helper()
-	p := NewParser()
-	go p.Start(root)
-	go func() {
-		for _, chunk := range chunks {
-			p.Put(chunk)
+	for cut := 0; cut <= len(input); cut++ {
+		parser := NewParser()
+		if err := parser.Put(input[:cut]); err != nil {
+			t.Fatal(err)
 		}
-		p.Close()
-	}()
-	result := make(chan []MarkdownSegment, 1)
-	go func() {
-		var output []MarkdownSegment
-		for {
-			seg, ok := p.Read()
-			if !ok {
-				result <- output
-				return
-			}
-			output = append(output, seg)
+		if _, state, err := parser.ReadNonBlocking(); err != nil || state != ReadPending {
+			t.Fatalf("unclosed input published: state %v, error %v", state, err)
 		}
-	}()
-	select {
-	case output := <-result:
-		return output
-	case <-time.After(3 * time.Second):
-		t.Fatal("parser did not finish after input was closed")
-		return nil
-	}
-}
-
-func assertSegments(t *testing.T, got []MarkdownSegment, want ...typedText) {
-	t.Helper()
-	expected := segments(want...)
-	if !slices.Equal(got, expected) {
-		t.Fatalf("segments differ:\n got: %#v\nwant: %#v", got, expected)
-	}
-}
-
-func segmentText(segs []MarkdownSegment) string {
-	var text strings.Builder
-	for _, seg := range segs {
-		text.WriteRune(seg.Rune)
-	}
-	return text.String()
-}
-
-func TestParserStreamsBeforeClose(t *testing.T) {
-	p := NewParser()
-	go p.Start(MarkdownDoc)
-	firstChunk := make(chan struct{}, 1)
-	finished := make(chan []MarkdownSegment, 1)
-	go func() {
-		var output []MarkdownSegment
-		for {
-			seg, ok := p.Read()
-			if !ok {
-				finished <- output
-				return
-			}
-			output = append(output, seg)
-			if len(output) == len("hello ") {
-				firstChunk <- struct{}{}
-			}
+		if _, err := parser.Write([]byte(input[cut:])); err != nil {
+			t.Fatal(err)
 		}
-	}()
-	closed := false
-	defer func() {
-		if !closed {
-			p.Close()
+		if err := parser.Close(); err != nil {
+			t.Fatal(err)
 		}
-	}()
-	p.Put("hello ")
-	select {
-	case <-firstChunk:
-	case <-time.After(3 * time.Second):
-		t.Fatal("plain text was buffered until input close")
-	}
-	p.Put("**world**")
-	p.Close()
-	closed = true
-	select {
-	case output := <-finished:
-		assertSegments(t, output,
-			typedText{"paragraph.text", "hello "},
-			typedText{"strong.prefix", "**"},
-			typedText{"strong.text", "world"},
-			typedText{"strong.suffix", "**"},
-		)
-	case <-time.After(3 * time.Second):
-		t.Fatal("parser did not finish the stream")
-	}
-}
-
-func TestParserLargeConcurrentStream(t *testing.T) {
-	const repetitions = 2048
-	const input = "正文 **bold** `code` [链接](https://example.test)\n"
-	want := segments(
-		typedText{"paragraph.text", "正文 "},
-		typedText{"strong.prefix", "**"},
-		typedText{"strong.text", "bold"},
-		typedText{"strong.suffix", "**"},
-		typedText{"paragraph.text", " "},
-		typedText{"inline-code.prefix", "`"},
-		typedText{"inline-code.text", "code"},
-		typedText{"inline-code.suffix", "`"},
-		typedText{"paragraph.text", " "},
-		typedText{"link.[", "["},
-		typedText{"link.name", "链接"},
-		typedText{"link.]", "]"},
-		typedText{"link.(", "("},
-		typedText{"link.url", "https://example.test"},
-		typedText{"link.)", ")"},
-		typedText{"whitespace", "\n"},
-	)
-	p := NewParser()
-	go p.Start(MarkdownDoc)
-	go func() {
-		for range repetitions {
-			p.Put(input)
-		}
-		p.Close()
-	}()
-	finished := make(chan error, 1)
-	go func() {
-		count := 0
-		var mismatch error
-		for {
-			seg, ok := p.Read()
-			if !ok {
-				break
-			}
-			if expected := want[count%len(want)]; seg != expected && mismatch == nil {
-				mismatch = fmt.Errorf("segment %d: got %#v, want %#v", count, seg, expected)
-			}
-			count++
-		}
-		if expected := len(want) * repetitions; count != expected && mismatch == nil {
-			mismatch = fmt.Errorf("got %d segments, want %d", count, expected)
-		}
-		finished <- mismatch
-	}()
-	select {
-	case err := <-finished:
+		document, err := parser.Document()
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("concurrent input and output stalled beyond the channel buffer sizes")
+		if actual := rendered(t, document); actual != rendered(t, whole) {
+			t.Fatalf("byte boundary %d changed HTML: %q", cut, actual)
+		}
+		var boundaries []struct {
+			Kind   EventKind
+			Type   TokenType
+			Range  SourceRange
+			Source string
+		}
+		for {
+			event, available, err := parser.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !available {
+				break
+			}
+			boundaries = append(boundaries, struct {
+				Kind   EventKind
+				Type   TokenType
+				Range  SourceRange
+				Source string
+			}{event.Kind, event.Token.Type, event.Token.Range, event.Token.Source()})
+		}
+		var expected []struct {
+			Kind   EventKind
+			Type   TokenType
+			Range  SourceRange
+			Source string
+		}
+		for _, event := range whole.Events {
+			expected = append(expected, struct {
+				Kind   EventKind
+				Type   TokenType
+				Range  SourceRange
+				Source string
+			}{event.Kind, event.Token.Type, event.Token.Range, event.Token.Source()})
+		}
+		if !reflect.DeepEqual(boundaries, expected) {
+			t.Fatalf("byte boundary %d changed concrete source boundaries", cut)
+		}
+		if _, state, err := parser.ReadNonBlocking(); err != nil || state != ReadDone {
+			t.Fatalf("exhaustion: state %v, error %v", state, err)
+		}
+		if err := parser.Put("later"); !errors.Is(err, ErrClosed) {
+			t.Fatalf("closed write: %v", err)
+		}
 	}
 }
 
-func TestParserNonBlockingReadStates(t *testing.T) {
-	p := NewParser()
-	if seg, ok := p.ReadNonBlocking(); seg != nil || !ok {
-		t.Fatalf("idle read: got (%#v, %t), want (nil, true)", seg, ok)
+func TestDecodedSourceKeepsOriginalBytes(t *testing.T) {
+	document, err := Parse("\ufeffa\x00b\r\n")
+	if err != nil {
+		t.Fatal(err)
 	}
-	finished := make(chan struct{})
-	go func() {
-		p.Start(MarkdownDoc)
-		close(finished)
-	}()
-	p.Put("X")
-	p.Close()
-	select {
-	case <-finished:
-	case <-time.After(3 * time.Second):
-		t.Fatal("parser did not close its output")
+	if document.Source() != "\ufeffa\x00b\r\n" || document.NormalizedSource() != "a�b\r\n" {
+		t.Fatalf("source decoding: raw %q, normalized %q", document.Source(), document.NormalizedSource())
 	}
-	seg, ok := p.ReadNonBlocking()
-	if !ok || seg == nil || *seg != (MarkdownSegment{Type: "paragraph.text", Rune: 'X'}) {
-		t.Fatalf("available read: got (%#v, %t)", seg, ok)
+	assertHTML(t, document.Source(), "<p>a�b</p>\r\n")
+	for _, event := range document.Events {
+		if event.Kind == Enter && event.Token.Type == "paragraph" {
+			if event.Token.Range.Start != (Position{ByteOffset: 3, Offset: 0, Line: 1, Column: 1}) || event.Token.Range.End != (Position{ByteOffset: 6, Offset: 3, Line: 1, Column: 4}) {
+				t.Fatalf("BOM/NUL coordinates: %+v", event.Token.Range)
+			}
+		}
 	}
-	if _, ok := p.ReadNonBlocking(); ok {
-		t.Fatal("exhausted output still reported an open stream")
+	encoded, err := ParseBytes([]byte{'a', 0, 0x3d, 0xd8, 0, 0xde}, Options{Encoding: UTF16LE})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoded.NormalizedSource() != "a😀" {
+		t.Fatalf("UTF-16 decoding: %q", encoded.NormalizedSource())
+	}
+	assertHTML(t, "\xff\xe4\xbd", "<p>���</p>")
+}
+
+func TestLogicalSourceExcludesContainerMargins(t *testing.T) {
+	document, err := Parse("> a\n> b\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paragraph *Token
+	for _, event := range document.Events {
+		if event.Kind == Enter && event.Token.Type == "paragraph" {
+			paragraph = event.Token
+			break
+		}
+	}
+	if paragraph == nil {
+		t.Fatal("missing paragraph")
+	}
+	if paragraph.Source() != "a\nb" || paragraph.RawSource() != "a\n> b" {
+		t.Fatalf("logical %q; physical %q", paragraph.Source(), paragraph.RawSource())
+	}
+	ranges := paragraph.SourceRanges()
+	if len(ranges) != 2 || ranges[0].Start.ByteOffset != 2 || ranges[0].End.ByteOffset != 4 || ranges[1].Start.ByteOffset != 6 || ranges[1].End.ByteOffset != 7 {
+		t.Fatalf("source pieces: %+v", ranges)
 	}
 }
 
-func TestParserUTF8AcrossChunks(t *testing.T) {
-	cases := []struct {
-		name   string
-		chunks []string
-		want   []typedText
-	}{
-		{"three-byte-rune", []string{"\xe4", "", "\xbd", "\xa0"}, []typedText{{"paragraph.text", "你"}}},
-		{"four-byte-rune", []string{"\xf0\x9f", "\x99", "\x82"}, []typedText{{"paragraph.text", "🙂"}}},
-		{"invalid-continuation", []string{"\xe4", "\xff", "x"}, []typedText{{"paragraph.text", "��x"}}},
-		{"incomplete-at-eof", []string{"\xe4", "\xbd"}, []typedText{{"paragraph.text", "��"}}},
-		{"nul-and-delimiters", []string{"\xe4", "\xbd", "\xa0\x00*", "*好*", "*"}, []typedText{{"paragraph.text", "你\x00"}, {"strong.prefix", "**"}, {"strong.text", "好"}, {"strong.suffix", "**"}}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assertSegments(t, parseChunks(t, MarkdownDoc, tc.chunks...), tc.want...)
-		})
-	}
-}
+type failingReader struct{ err error }
 
-func FuzzParserPreservesInput(f *testing.F) {
-	for _, input := range []string{
-		"", "plain 中文🙂", "before\x00after", "\\*literal\\*", "**a _b_**",
-		"| h |\n| -x- |\n| v |\n", "| h |\n| --- |\n# next\n",
-		"```go\nx := \"```\"\n```\n", "[a\\]b](url)", "a\r\nb\rc",
-		"`a\\\nb`", "\xff\xe4\xbd",
-	} {
-		f.Add(input, uint8(1))
-	}
-	f.Fuzz(func(t *testing.T, input string, chunkSize uint8) {
-		if len(input) > 4096 {
-			t.Skip("bound fuzz input to keep each parser run small")
-		}
-		width := int(chunkSize)%64 + 1
-		var chunks []string
-		for start := 0; start < len(input); start += width {
-			chunks = append(chunks, input[start:min(start+width, len(input))])
-		}
-		got := segmentText(parseChunks(t, MarkdownDoc, chunks...))
-		want := string([]rune(input))
-		if got != want {
-			t.Fatalf("input changed: got %q, want %q", got, want)
-		}
-	})
-}
+func (reader failingReader) Read([]byte) (int, error) { return 0, reader.err }
 
-func TestParserEOFIsDistinctFromNUL(t *testing.T) {
-	p := NewParser()
-	p.Put("A\x00B")
-	p.Close()
-	for _, want := range "A\x00B" {
-		if got := p.Peek(); got != want {
-			t.Fatalf("Peek() = %U, want %U", got, want)
-		}
-		if got := p.Next(); got != want {
-			t.Fatalf("Next() = %U, want %U", got, want)
-		}
+type failingWriter struct{ err error }
+
+func (writer failingWriter) Write([]byte) (int, error) { return 0, writer.err }
+
+func TestInputAndCompilerErrorsPropagate(t *testing.T) {
+	failure := errors.New("consumer failure")
+	if document, err := ParseReader(failingReader{failure}); document != nil || !errors.Is(err, failure) {
+		t.Fatalf("reader failure: document %v, error %v", document, err)
 	}
-	for range 2 {
-		if got := p.Peek(); got != EOF {
-			t.Fatalf("Peek() after input = %U, want EOF", got)
-		}
-		if got := p.Next(); got != EOF {
-			t.Fatalf("Next() after input = %U, want EOF", got)
-		}
+	if document, err := Parse("x", Options{Encoding: "unsupported"}); document != nil || err == nil {
+		t.Fatalf("decoder failure: document %v, error %v", document, err)
+	}
+	parser := NewParser()
+	if err := parser.Put("unfinished"); err != nil {
+		t.Fatal(err)
+	}
+	if err := parser.CloseWithError(failure); err != nil {
+		t.Fatal(err)
+	}
+	if document, err := parser.Document(); document != nil || !errors.Is(err, failure) {
+		t.Fatalf("producer failure: document %v, error %v", document, err)
+	}
+	if _, available, err := parser.Read(); available || !errors.Is(err, failure) {
+		t.Fatalf("event failure: available %v, error %v", available, err)
+	}
+	document, err := Parse("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RenderHTML(failingWriter{failure}, document); !errors.Is(err, failure) {
+		t.Fatalf("writer failure: %v", err)
+	}
+	if err := RenderHTML(io.Discard, document, Options{HTMLExtensions: []HTMLExtension{{Enter: map[TokenType]HTMLHandler{"paragraph": func(*CompileContext, *Token) error { return failure }}}}}); !errors.Is(err, failure) {
+		t.Fatalf("compiler failure: %v", err)
 	}
 }
