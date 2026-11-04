@@ -18,20 +18,6 @@ A streaming-first Go Markdown parser with CommonMark + GFM, a concrete syntax tr
 - **Declarative grammar** — every built-in and custom construct is a `Rule` tree (`Sequence`, `Or`, `Repeat`, `SepBy`, `Span`, `Guard`, `Bind`, ...). Extensions use the same engine as the core.
 - **Zero dependencies** — standard library only.
 
-## Compatibility
-
-| Area | Coverage | Status |
-|---|---|---|
-| CommonMark 0.31.2 | 652/652 spec examples | Full |
-| GFM | 176/176 reference fixtures: tables, strikethrough, task lists, literal autolinks, footnotes | Full |
-| Math | inline and block TeX preserved with math classes; no KaTeX evaluation | Extension |
-| CST / AST / HTML | concrete tokens, source ranges, UTF-16 positions, editable AST, `RenderHTML` / `RenderAST` | Full |
-| Streaming | incremental confirmed token events; always a prefix of the full parse | Full |
-| Raw HTML / protocols | parsed; rendering and dangerous protocols require explicit opt-in | Full |
-| Extensions | same declarative `Rule` grammar for built-ins and custom syntax | Full |
-
-CommonMark is covered by all 652 spec examples; GFM by the 176 reference fixtures in `internal/core/testdata`. Streaming emits confirmed top-level tokens, not provisional character-level tokens.
-
 ## Quick start
 
 ```go
@@ -170,6 +156,20 @@ for _, event := range document.Events {
 // criticDelete {--delete--}
 // criticComment {>>comment<<}
 ```
+
+## Compatibility
+
+| Area | Coverage | Status |
+|---|---|---|
+| CommonMark 0.31.2 | 652/652 spec examples | Full |
+| GFM | 176/176 reference fixtures: tables, strikethrough, task lists, literal autolinks, footnotes | Full |
+| Math | inline and block TeX preserved with math classes; no KaTeX evaluation | Extension |
+| CST / AST / HTML | concrete tokens, source ranges, UTF-16 positions, editable AST, `RenderHTML` / `RenderAST` | Full |
+| Streaming | incremental confirmed token events; always a prefix of the full parse | Full |
+| Raw HTML / protocols | parsed; rendering and dangerous protocols require explicit opt-in | Full |
+| Extensions | same declarative `Rule` grammar for built-ins and custom syntax | Full |
+
+CommonMark is covered by all 652 spec examples; GFM by the 176 reference fixtures in `internal/core/testdata`. Streaming emits confirmed top-level tokens, not provisional character-level tokens.
 
 ## Installation
 

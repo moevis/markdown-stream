@@ -14,20 +14,6 @@
 - **自定义语法**：`SyntaxExtension` + `Rule` 组合子，与内置文法共用同一入口。
 - **LLM 输出**：可直接写入模型逐块返回的文本，最终解析结果与一次性输入相同。
 
-## 兼容性
-
-| 范围 | 覆盖 | 状态 |
-|---|---|---|
-| CommonMark 0.31.2 | 652/652 规范示例 | 完全支持 |
-| GFM | 176/176 参考 fixture：表格、删除线、任务列表、字面自动链接、脚注 | 完全支持 |
-| Math | 行内与块级 TeX 保留并添加数学类名；不运行 KaTeX | 扩展 |
-| CST / AST / HTML | 具体 token、源码范围、UTF-16 位置、可编辑 AST、`RenderHTML` / `RenderAST` | 完全支持 |
-| 流式 | 增量确认 token 事件，始终是完整解析的前缀 | 完全支持 |
-| 原始 HTML / 协议 | 可解析；渲染与危险协议需要显式开启 | 完全支持 |
-| 扩展 | 内置与自定义语法共用声明式 `Rule` | 完全支持 |
-
-CommonMark 覆盖全部 652 个规范示例；GFM 覆盖 `internal/core/testdata` 中的 176 个参考 fixture。流式输出的是已确认的顶层 token，不是可撤回的字符级 token。
-
 ## 快速开始
 
 ```go
@@ -151,6 +137,20 @@ for _, event := range document.Events {
 // criticDelete {--删除--}
 // criticComment {>>批注<<}
 ```
+
+## 兼容性
+
+| 范围 | 覆盖 | 状态 |
+|---|---|---|
+| CommonMark 0.31.2 | 652/652 规范示例 | 完全支持 |
+| GFM | 176/176 参考 fixture：表格、删除线、任务列表、字面自动链接、脚注 | 完全支持 |
+| Math | 行内与块级 TeX 保留并添加数学类名；不运行 KaTeX | 扩展 |
+| CST / AST / HTML | 具体 token、源码范围、UTF-16 位置、可编辑 AST、`RenderHTML` / `RenderAST` | 完全支持 |
+| 流式 | 增量确认 token 事件，始终是完整解析的前缀 | 完全支持 |
+| 原始 HTML / 协议 | 可解析；渲染与危险协议需要显式开启 | 完全支持 |
+| 扩展 | 内置与自定义语法共用声明式 `Rule` | 完全支持 |
+
+CommonMark 覆盖全部 652 个规范示例；GFM 覆盖 `internal/core/testdata` 中的 176 个参考 fixture。流式输出的是已确认的顶层 token，不是可撤回的字符级 token。
 
 ## 安装
 
