@@ -1,6 +1,8 @@
 # 扩展：GFM、数学与自定义语法
 
-本文说明内置 GFM/数学语法和自定义语法扩展；快速开始见 [README](../README.md)。
+[English](EXTENSIONS.en.md) | 简体中文
+
+本文说明内置 GFM/数学语法和自定义语法扩展；快速开始见 [README](../README.zh-CN.md)。
 
 ## GFM 与数学扩展
 

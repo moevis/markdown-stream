@@ -26,9 +26,17 @@ jobs:
           go-version: ${{ matrix.go }}
           cache: false
       - name: Test
+        if: matrix.go == '1.22.x'
         run: go test ./... -count=1 -timeout=30s
       - name: Vet
         run: go vet ./...
       - name: Race
         if: matrix.go == 'stable'
         run: go test -race ./... -count=1 -timeout=30s
+      - name: Coverage
+        if: matrix.go == 'stable'
+        run: |
+          go test ./... -count=1 -timeout=60s -coverprofile=coverage.out -coverpkg=./...
+          go tool cover -func=coverage.out | tail -1
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); print $3}')
+          awk -v total="$total" 'BEGIN { if (total+0 < 80) { print "coverage below 80%"; exit 1 } }'

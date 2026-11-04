@@ -1,12 +1,38 @@
 # markdown-stream
 
-原生 Go CommonMark 解析器，支持流式 token 输出与自定义语法扩展。提供具体语法树（CST）、可编辑语义 AST 和 HTML 编译；核心文法由声明式 `Rule` 组合子构成。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-- **流式解析**：`NewTokenStream` 接收分块输入，通过 `Next` 返回已确认的 token 事件。
-- **自定义语法**：`SyntaxExtension` + `Rule` 组合子，与内置文法共用同一入口。
-- **LLM 输出**：可直接写入模型逐块返回的文本，最终解析结果与一次性输入相同。
+A streaming-first Go Markdown parser with CommonMark + GFM, a concrete syntax tree (CST), an editable AST, HTML rendering, and declarative parser combinators. Designed for real-time LLM output and custom syntax extensions, with no third-party dependencies.
 
-## 快速开始
+[![Go Reference](https://pkg.go.dev/badge/github.com/moevis/markdown-stream.svg)](https://pkg.go.dev/github.com/moevis/markdown-stream)
+[![CI](https://github.com/moevis/markdown-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/moevis/markdown-stream/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/moevis/markdown-stream)](go.mod)
+[![Coverage](https://img.shields.io/badge/coverage-83.7%25-brightgreen)](https://github.com/moevis/markdown-stream/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/moevis/markdown-stream)](LICENSE)
+
+## Why markdown-stream
+
+- **Streaming tokens** — feed chunks with `Put`/`Write` and read confirmed CST token events with `Next`. Events are always a prefix of the full parse and are never retracted.
+- **CommonMark + GFM** — the core grammar plus tables, strikethrough, task lists, literal autolinks, footnotes, and math through explicit extensions.
+- **CST and editable AST** — concrete tokens retain logical source, raw source, source ranges, and UTF-16 positions. `RenderHTML` keeps the parsed concrete semantics; `RenderAST` renders the edited semantic tree.
+- **Declarative grammar** — every built-in and custom construct is a `Rule` tree (`Sequence`, `Or`, `Repeat`, `SepBy`, `Span`, `Guard`, `Bind`, ...). Extensions use the same engine as the core.
+- **Zero dependencies** — standard library only.
+
+## Compatibility
+
+| Area | Coverage | Status |
+|---|---|---|
+| CommonMark 0.31.2 | 652/652 spec examples | Full |
+| GFM | 176/176 reference fixtures: tables, strikethrough, task lists, literal autolinks, footnotes | Full |
+| Math | inline and block TeX preserved with math classes; no KaTeX evaluation | Extension |
+| CST / AST / HTML | concrete tokens, source ranges, UTF-16 positions, editable AST, `RenderHTML` / `RenderAST` | Full |
+| Streaming | incremental confirmed token events; always a prefix of the full parse | Full |
+| Raw HTML / protocols | parsed; rendering and dangerous protocols require explicit opt-in | Full |
+| Extensions | same declarative `Rule` grammar for built-ins and custom syntax | Full |
+
+CommonMark is covered by all 652 spec examples; GFM by the 176 reference fixtures in `internal/core/testdata`. Streaming emits confirmed top-level tokens, not provisional character-level tokens.
+
+## Quick start
 
 ```go
 package main
@@ -18,7 +44,7 @@ import (
 )
 
 func main() {
-	html, err := markdown.HTML("这是**粗体**和一个[链接](https://github.com)。")
+	html, err := markdown.HTML("This is **bold** and a [link](https://github.com).")
 	if err != nil {
 		panic(err)
 	}
@@ -26,9 +52,9 @@ func main() {
 }
 ```
 
-## 流式输入
+## Streaming tokens
 
-将文本块交给 `Put` / `Write`，每次追加后调用 `Next` 读取已确认的 token 事件。`ReadPending` 表示当前没有更多已确认事件；输入结束时调用 `Close`，继续读取直到 `ReadDone`。
+Append text chunks with `Put` (or `Write`), then call `Next` to read confirmed token events. `ReadPending` means no further event is confirmed yet; call `Close` at the end of input and continue until `ReadDone`.
 
 ```go
 stream := markdown.NewTokenStream()
@@ -46,7 +72,7 @@ drain := func() {
 		}
 	}
 }
-for _, chunk := range []string{"# 标", "题\n\n", "正文\n\n"} {
+for _, chunk := range []string{"# Ti", "tle\n\n", "body\n\n"} {
 	if err := stream.Put(chunk); err != nil {
 		panic(err)
 	}
@@ -58,11 +84,11 @@ if err := stream.Close(); err != nil {
 drain()
 ```
 
-带 resolver 或自定义 Tokenizer 的配置在输入结束后整篇解析；需要完整 `Document` 时使用 `Parse`。
+Configurations with resolvers or custom tokenizers fall back to a full parse after `Close`. Use `Parse` when you need a confirmed `Document`.
 
-## 可编辑 AST
+## Editable AST
 
-`Document.Root` 是可编辑语义 AST。下面的例子修改文本节点，再分别用 `RenderHTML`（保留解析时的具体语义）和 `RenderAST`（反映修改后的树）渲染：
+`Document.Root` is an editable semantic tree. The example edits text nodes, then renders both the original concrete semantics and the edited tree:
 
 ```go
 document, err := markdown.Parse("hello")
@@ -86,51 +112,34 @@ fmt.Println(original.String()) // <p>hello</p>
 fmt.Println(edited.String())   // <p>edited</p>
 ```
 
-## 扩展
+## Extensions
 
-内置 GFM 与数学语法（`GFM()` + `GFMHTML()`，`Math()` + `MathHTML()`）；自定义语法使用同一套 `Rule` 组合子。内置元素以命名 `Construct` 组织，短规则直接呈现在元素声明中，复杂规则使用邻近的具名条件与语义动作。用法、规则组织和 `ExampleSyntaxExtension` 见 [EXTENSIONS.md](docs/EXTENSIONS.md)。
-
-### 示例：CriticMarkup
-
-用现有组合子识别 `{++新增++}`、`{--删除--}`、`{~~旧~>新~~}`、`{>>批注<<}`，不需要自定义 Tokenizer：
+Enable GFM and math explicitly:
 
 ```go
-separator := markdown.String("~>")
-replacementEnd := markdown.String("~~}")
+options := markdown.Options{
+	Extensions:     []markdown.SyntaxExtension{markdown.GFM(), markdown.Math()},
+	HTMLExtensions: []markdown.HTMLExtension{markdown.GFMHTML(), markdown.MathHTML()},
+}
+html, err := markdown.HTML("- [x] ~~done~~\n\n$x < y$", options)
+```
+
+Custom syntax uses the same `Rule` combinators and does not require a separate tokenizer:
+
+```go
 criticMarkup := markdown.Or(
 	markdown.Span("criticAdd", "{++", "++}"),
 	markdown.Span("criticDelete", "{--", "--}"),
-	markdown.Capture("criticReplace", markdown.Sequence(
-		markdown.String("{~~"), markdown.Until(markdown.Or(separator, replacementEnd)),
-		separator, markdown.Until(replacementEnd), replacementEnd,
-	)),
 	markdown.Span("criticComment", "{>>", "<<}"),
 )
 syntax := markdown.SyntaxExtension{Text: map[markdown.Code][]markdown.Construct{
 	'{': {{Name: "criticMarkup", Rule: criticMarkup}},
 }}
-
-document, err := markdown.Parse("{++新增++} {--删除--} {>>批注<<}", markdown.Options{
-	Extensions: []markdown.SyntaxExtension{syntax},
-})
-if err != nil {
-	panic(err)
-}
-for _, event := range document.Events {
-	if event.Kind != markdown.Enter {
-		continue
-	}
-	switch event.Token.Type {
-	case "criticAdd", "criticDelete", "criticReplace", "criticComment":
-		fmt.Println(event.Token.Type, event.Token.Source())
-	}
-}
-// criticAdd {++新增++}
-// criticDelete {--删除--}
-// criticComment {>>批注<<}
 ```
 
-## 安装
+See [Extensions](docs/EXTENSIONS.en.md) for the combinator set, GFM/math options, resolver lifecycle, and a complete `ExampleSyntaxExtension`.
+
+## Installation
 
 ```bash
 go get github.com/moevis/markdown-stream
