@@ -114,6 +114,8 @@ fmt.Println(edited.String())   // <p>edited</p>
 
 ## Extensions
 
+GFM and math are explicit extensions. Custom syntax uses the same `Rule` combinators (`Sequence`, `Or`, `Repeat`, `SepBy`, `Span`, `Capture`, `Until`, `Guard`, `Bind`, ...) and does not require a separate tokenizer. Built-in elements are declared as named `Construct`s: short rules stay in the element declaration, while complex rules use nearby named guards and actions. See [Extensions](docs/EXTENSIONS.en.md) for the combinator table, resolver lifecycle, and a complete `ExampleSyntaxExtension`.
+
 Enable GFM and math explicitly:
 
 ```go
@@ -122,22 +124,52 @@ options := markdown.Options{
 	HTMLExtensions: []markdown.HTMLExtension{markdown.GFMHTML(), markdown.MathHTML()},
 }
 html, err := markdown.HTML("- [x] ~~done~~\n\n$x < y$", options)
+if err != nil {
+	panic(err)
+}
 ```
 
-Custom syntax uses the same `Rule` combinators and does not require a separate tokenizer:
+`GFM()` adds tables, strikethrough, task lists, literal autolinks, and footnotes; `GFMHTML()` compiles them and filters GFM-forbidden tags. `Math()` recognizes inline and block TeX; `MathHTML()` keeps TeX as escaped text with math classes and does not run KaTeX.
+
+### Example: CriticMarkup
+
+Recognize `{++add++}`, `{--delete--}`, `{~~old~>new~~}`, and `{>>comment<<}` with the existing combinators, without a custom tokenizer:
 
 ```go
+separator := markdown.String("~>")
+replacementEnd := markdown.String("~~}")
 criticMarkup := markdown.Or(
 	markdown.Span("criticAdd", "{++", "++}"),
 	markdown.Span("criticDelete", "{--", "--}"),
+	markdown.Capture("criticReplace", markdown.Sequence(
+		markdown.String("{~~"), markdown.Until(markdown.Or(separator, replacementEnd)),
+		separator, markdown.Until(replacementEnd), replacementEnd,
+	)),
 	markdown.Span("criticComment", "{>>", "<<}"),
 )
 syntax := markdown.SyntaxExtension{Text: map[markdown.Code][]markdown.Construct{
 	'{': {{Name: "criticMarkup", Rule: criticMarkup}},
 }}
-```
 
-See [Extensions](docs/EXTENSIONS.en.md) for the combinator set, GFM/math options, resolver lifecycle, and a complete `ExampleSyntaxExtension`.
+document, err := markdown.Parse("{++add++} {--delete--} {>>comment<<}", markdown.Options{
+	Extensions: []markdown.SyntaxExtension{syntax},
+})
+if err != nil {
+	panic(err)
+}
+for _, event := range document.Events {
+	if event.Kind != markdown.Enter {
+		continue
+	}
+	switch event.Token.Type {
+	case "criticAdd", "criticDelete", "criticReplace", "criticComment":
+		fmt.Println(event.Token.Type, event.Token.Source())
+	}
+}
+// criticAdd {++add++}
+// criticDelete {--delete--}
+// criticComment {>>comment<<}
+```
 
 ## Installation
 
